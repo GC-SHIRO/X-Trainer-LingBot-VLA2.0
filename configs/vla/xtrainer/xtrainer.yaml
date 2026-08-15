@@ -23,7 +23,9 @@ data:
     - arm.position: meanstd
     - effector.position: meanstd
   norm_stats_file: assets/norm_stats/xtrainer.json
-  num_workers: 8
+  # Per-rank worker count. Four workers keeps an 8-GPU run within a typical
+  # 64-core node while still decoding the three video streams in parallel.
+  num_workers: 4
   use_future_image: true
 
 train:
@@ -49,9 +51,12 @@ train:
   use_shared_expert_gate: false
   use_moe_expert_lr: true
   data_parallel_mode: fsdp2
-  enable_full_shard: false
+  # The 6B model should use FSDP full sharding for multi-GPU full fine-tuning.
+  enable_full_shard: true
   module_fsdp_enable: true
-  use_compile: true
+  # Keep the default eager for a reproducible first run. Enable compile only
+  # after a short smoke test has completed successfully on the target cluster.
+  use_compile: false
   use_wandb: false
   rmpad: false
   rmpad_with_pos_ids: false
@@ -64,15 +69,26 @@ train:
   optimizer: muon
   lr: 5.0e-5
   lr_decay_style: constant
-  num_train_epochs: 29000
+  # max_steps is the sole stop condition. Keeping this null avoids an
+  # accidental 29,000-epoch run if max_steps is removed in an override.
+  num_train_epochs: null
   micro_batch_size: 1
   gradient_accumulation_steps: 1
-  max_steps: 40000
+  max_steps: 20000
   ckpt_manager: dcp
-  save_steps: 40000
-  save_epochs: 29000
-  enable_fp32: true
+  save_steps: 5000
+  save_epochs: 0
+  # Use BF16 by default; FP32 action-expert training is an opt-in stability
+  # fallback when BF16 has been validated as insufficient.
+  enable_fp32: false
+  # CPU activation offload is a memory fallback and substantially slows an
+  # otherwise well-provisioned multi-GPU run.
+  enable_activation_offload: false
+  activation_gpu_limit: 8
   enable_resume: true
+  # Export an inference-ready safetensors checkpoint in addition to DCP.
+  save_hf_weights: true
+  async_save_hf_weights: true
   align_params:
     mode: query
     num_task_tokens: 8
