@@ -239,6 +239,16 @@ print("dataset contract ok", len(dataset))
 
 如果本地 LeRobot API 的构造参数不同，以环境中固定的 `lerobot==0.4.2` 为准。某一路图像缺失或损坏时，应丢弃整帧或整条 episode，不能让三路图像与 state/action 错位。
 
+对于已生成的 X-Trainer 视频数据集，可在不改动源数据的前提下创建相机方向校正副本。顶视和左手腕保持不变，右手腕上下加左右翻转：
+
+```bash
+python tools/transform_xtrainer_dataset_images.py \
+  --input-root /data/xtrainer_dataset_original \
+  --output-root /data/xtrainer_dataset_camera_aligned
+```
+
+可先增加 `--dry-run` 验证输入；输出目录已存在时必须显式指定 `--overwrite-output`。
+
 ---
 
 ## 7. X-Trainer 数据配置

@@ -8,6 +8,7 @@ import numpy as np
 from deploy import image_tools
 
 from .hardware import DobotXTrainer
+from .image_transforms import prepare_xtrainer_camera_image
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class XTrainerRealEnvironment:
         }
         for camera_name in ("top", "left_wrist", "right_wrist"):
             frame = self._read_camera_frame(camera_name)
+            frame = prepare_xtrainer_camera_image(camera_name, frame)
             frame = image_tools.resize_with_pad(frame, self._render_height, self._render_width)
             observation[f"observation.images.{camera_name}"] = image_tools.convert_to_uint8(frame)
         return observation
