@@ -60,7 +60,7 @@ python scripts/run_xtrainer_real.py \
   --camera-top-serial TOP_SERIAL \
   --camera-left-wrist-serial LEFT_WRIST_SERIAL \
   --camera-right-wrist-serial RIGHT_WRIST_SERIAL \
-  --action-horizon 25 \
+  --action-horizon 50 \
   --control-hz 20
 ```
 

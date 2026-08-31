@@ -184,8 +184,6 @@ def main() -> None:
         camera_left_wrist_serial=args.camera_left_wrist_serial,
         camera_right_wrist_serial=args.camera_right_wrist_serial,
         camera_fps=args.camera_fps,
-        render_height=224,
-        render_width=224,
         task="sequential basic control test",
     )
 

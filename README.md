@@ -543,7 +543,7 @@ python scripts/run_xtrainer_real.py \
   --camera-top-serial <TOP_SERIAL> \
   --camera-left-wrist-serial <LEFT_WRIST_SERIAL> \
   --camera-right-wrist-serial <RIGHT_WRIST_SERIAL> \
-  --action-horizon 25 \
+  --action-horizon 50 \
   --control-hz 10 \
   --max-steps 100
 ```
@@ -554,11 +554,11 @@ python scripts/run_xtrainer_real.py \
 
 | 参数 | 默认值 | 作用 |
 |---|---:|---|
-| `--max-joint-delta` | `0.17` | 大幅目标变化触发平滑处理。 |
+| `--max-joint-delta` | `inf` | 默认不改写 policy 的关节目标；显式设置有限值时才触发平滑处理。 |
 | `--ramp-step` | `0.01` | 平滑过渡步长。 |
 | `--ramp-max-steps` | `100` | 平滑过渡最大步数。 |
-| `--gripper-update-threshold` | `0.02` | 夹爪最小更新阈值。 |
-| `--servo-step-limit` | `0.9` | follower 单步限制。 |
+| `--gripper-update-threshold` | `0` | 默认发送每次夹爪目标变化。 |
+| `--servo-step-limit` | `inf` | 默认不限制 follower 的关节目标跳变。 |
 | `--max-switch-delta` | `0.12` | chunk 边界触发混合的阈值。 |
 | `--switch-blend-steps` | `5` | chunk 边界混合步数。 |
 | `--max-delta-per-step` | `0` | 最终逐步限幅；`0` 表示关闭。 |
@@ -567,7 +567,7 @@ python scripts/run_xtrainer_real.py \
 
 ### 13.6 异步预取
 
-默认 `--prefetch-remaining 8`。建议按实测推理延迟调整：
+默认 `--prefetch-remaining 0`，即完整执行当前 50 步 action chunk 后再同步请求下一段。需要降低推理等待时，可显式开启预取；建议按实测推理延迟调整：
 
 ```text
 prefetch_remaining >= ceil(平均推理秒数 * control_hz) + 安全余量

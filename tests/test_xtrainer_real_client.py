@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import sys
 import types
 import unittest
@@ -31,6 +32,32 @@ class ActionChunkTest(unittest.TestCase):
     def test_truncates_chunk_to_horizon(self) -> None:
         actions = np.zeros((50, 14), dtype=np.float32)
         self.assertEqual(self.client._extract_action_chunk({"action": actions}, 25).shape, (25, 14))
+
+    def test_cli_defaults_execute_full_chunk_without_prefetch_or_execution_limits(self) -> None:
+        import unittest.mock
+
+        with unittest.mock.patch.object(
+            sys,
+            "argv",
+            [
+                "run_xtrainer_real.py",
+                "--host",
+                "127.0.0.1",
+                "--camera-top-serial",
+                "top",
+                "--camera-left-wrist-serial",
+                "left",
+                "--camera-right-wrist-serial",
+                "right",
+            ],
+        ):
+            args = self.client.parse_args()
+
+        self.assertEqual(args.action_horizon, 50)
+        self.assertEqual(args.prefetch_remaining, 0)
+        self.assertTrue(math.isinf(args.max_joint_delta))
+        self.assertEqual(args.gripper_update_threshold, 0.0)
+        self.assertTrue(math.isinf(args.servo_step_limit))
 
     def test_promotes_single_action(self) -> None:
         action = np.zeros(14, dtype=np.float32)

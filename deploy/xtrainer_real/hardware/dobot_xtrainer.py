@@ -150,7 +150,7 @@ class DobotXTrainer:
         speed_j: int = 20,
         servo_j_time: float = 0.03,
         disable_torque_on_disconnect: bool = True,
-        max_delta_per_step: float = 0.9,
+        max_delta_per_step: float = float("inf"),
         camera_serials: dict[str, str] | None = None,
         camera_fps: float = 30.0,
     ):

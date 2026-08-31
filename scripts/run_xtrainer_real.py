@@ -191,7 +191,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", required=True, help="LingBot policy server address")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--task", default="pick up the object")
-    parser.add_argument("--action-horizon", type=int, default=25)
+    parser.add_argument("--action-horizon", type=int, default=50)
     parser.add_argument("--control-hz", type=float, default=20.0)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--left-robot-ip", default="192.168.5.1")
@@ -206,18 +206,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-left-wrist-serial", required=True)
     parser.add_argument("--camera-right-wrist-serial", required=True)
     parser.add_argument("--camera-fps", type=float, default=30.0)
-    parser.add_argument("--render-height", type=int, default=224)
-    parser.add_argument("--render-width", type=int, default=224)
-    parser.add_argument("--max-joint-delta", type=float, default=0.17)
+    parser.add_argument(
+        "--max-joint-delta",
+        type=float,
+        default=float("inf"),
+        help="Optional environment joint delta limit in radians; default disables it",
+    )
     parser.add_argument("--ramp-step", type=float, default=0.01)
     parser.add_argument("--ramp-max-steps", type=int, default=100)
-    parser.add_argument("--gripper-update-threshold", type=float, default=0.02)
-    parser.add_argument("--servo-step-limit", type=float, default=0.9)
+    parser.add_argument(
+        "--gripper-update-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum gripper target change to transmit; default sends every change",
+    )
+    parser.add_argument(
+        "--servo-step-limit",
+        type=float,
+        default=float("inf"),
+        help="Optional follower joint jump limit in radians; default disables it",
+    )
     parser.add_argument(
         "--prefetch-remaining",
         type=int,
-        default=8,
-        help="Start background inference when this many actions remain in the current chunk; 0 disables prefetch",
+        default=0,
+        help="Start background inference when this many actions remain in the current chunk; default disables prefetch",
     )
     parser.add_argument(
         "--prefetch-state-mode",
@@ -292,8 +305,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         "control_hz": args.control_hz,
         "max_steps": args.max_steps,
         "camera_fps": args.camera_fps,
-        "render_height": args.render_height,
-        "render_width": args.render_width,
         "ramp_step": args.ramp_step,
         "ramp_max_steps": args.ramp_max_steps,
         "servo_step_limit": args.servo_step_limit,
@@ -342,8 +353,6 @@ def main() -> None:
         camera_left_wrist_serial=args.camera_left_wrist_serial,
         camera_right_wrist_serial=args.camera_right_wrist_serial,
         camera_fps=args.camera_fps,
-        render_height=args.render_height,
-        render_width=args.render_width,
         task=args.task,
         reset_pose=metadata.get("reset_pose"),
         max_joint_delta=args.max_joint_delta,

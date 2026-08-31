@@ -5,8 +5,6 @@ from typing import Optional
 
 import numpy as np
 
-from deploy import image_tools
-
 from .hardware import DobotXTrainer
 from .image_transforms import prepare_xtrainer_camera_image
 
@@ -39,15 +37,13 @@ class XTrainerRealEnvironment:
         camera_left_wrist_serial: str,
         camera_right_wrist_serial: str,
         camera_fps: float = 30.0,
-        render_height: int = 224,
-        render_width: int = 224,
         task: str,
         reset_pose: Optional[list[float]] = None,
-        max_joint_delta: float = 0.17,
+        max_joint_delta: float = float("inf"),
         ramp_step: float = 0.01,
         ramp_max_steps: int = 100,
-        gripper_update_threshold: float = 0.02,
-        servo_step_limit: float = 0.9,
+        gripper_update_threshold: float = 0.0,
+        servo_step_limit: float = float("inf"),
     ) -> None:
         self._follower_left = DobotXTrainer(
             robot_ip=left_robot_ip,
@@ -73,8 +69,6 @@ class XTrainerRealEnvironment:
             camera_fps=camera_fps,
         )
 
-        self._render_height = render_height
-        self._render_width = render_width
         self._task = task
         self._max_joint_delta = max_joint_delta
         self._ramp_step = ramp_step
@@ -110,8 +104,7 @@ class XTrainerRealEnvironment:
         for camera_name in ("top", "left_wrist", "right_wrist"):
             frame = self._read_camera_frame(camera_name)
             frame = prepare_xtrainer_camera_image(camera_name, frame)
-            frame = image_tools.resize_with_pad(frame, self._render_height, self._render_width)
-            observation[f"observation.images.{camera_name}"] = image_tools.convert_to_uint8(frame)
+            observation[f"observation.images.{camera_name}"] = frame
         return observation
 
     def apply_action(self, action: np.ndarray) -> None:
