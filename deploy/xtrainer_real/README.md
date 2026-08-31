@@ -61,7 +61,7 @@ python scripts/run_xtrainer_real.py \
   --camera-left-wrist-serial LEFT_WRIST_SERIAL \
   --camera-right-wrist-serial RIGHT_WRIST_SERIAL \
   --action-horizon 50 \
-  --control-hz 20
+  --control-hz 30
 ```
 
 其中 `--host` 是推理服务器的局域网/VPN IP。模型服务器不需要连接机器人、串口或相机；这些硬件只连接运行本客户端的控制机。

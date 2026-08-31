@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-left-wrist-serial", required=True)
     parser.add_argument("--camera-right-wrist-serial", required=True)
     parser.add_argument("--camera-fps", type=float, default=30.0)
-    parser.add_argument("--control-hz", type=float, default=20.0)
+    parser.add_argument("--control-hz", type=float, default=30.0)
     parser.add_argument("--move-seconds", type=float, default=1.0)
     parser.add_argument("--hold-seconds", type=float, default=0.5)
     parser.add_argument("--gripper-open", type=float, default=1.0)

@@ -54,6 +54,7 @@ class ActionChunkTest(unittest.TestCase):
             args = self.client.parse_args()
 
         self.assertEqual(args.action_horizon, 50)
+        self.assertEqual(args.control_hz, 30.0)
         self.assertEqual(args.prefetch_remaining, 0)
         self.assertTrue(math.isinf(args.max_joint_delta))
         self.assertEqual(args.gripper_update_threshold, 0.0)

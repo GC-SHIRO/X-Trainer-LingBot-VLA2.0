@@ -548,7 +548,7 @@ python scripts/run_xtrainer_real.py \
   --max-steps 100
 ```
 
-首次真实模型测试先使用 10Hz 和较小 `max-steps`；验证稳定后再逐步提高到默认 20Hz。
+首次真实模型测试先使用 10Hz 和较小 `max-steps`；验证稳定后再逐步提高到默认 30Hz。
 
 ### 13.5 安全与平滑默认值
 
@@ -583,8 +583,8 @@ python scripts/run_xtrainer_real.py \
   --camera-left-wrist-serial <LEFT_WRIST_SERIAL> \
   --camera-right-wrist-serial <RIGHT_WRIST_SERIAL> \
   --action-horizon 50 \
-  --control-hz 20 \
-  --prefetch-remaining 20 \
+  --control-hz 30 \
+  --prefetch-remaining 28 \
   --max-switch-delta 0.12 \
   --switch-blend-steps 5 \
   --max-delta-per-step 0.05 \

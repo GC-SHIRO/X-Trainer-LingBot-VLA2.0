@@ -52,8 +52,8 @@ python scripts/run_xtrainer_real.py \
   --camera-left-wrist-serial LEFT_WRIST_SERIAL \
   --camera-right-wrist-serial RIGHT_WRIST_SERIAL \
   --action-horizon 50 \
-  --control-hz 20 \
-  --prefetch-remaining 20 \
+  --control-hz 30 \
+  --prefetch-remaining 28 \
   --max-switch-delta 0.12 \
   --switch-blend-steps 5 \
   --max-delta-per-step 0.05
@@ -97,13 +97,13 @@ python scripts/run_xtrainer_real.py \
 
 客户端每次最多执行多少步 action chunk。服务端的 `--use-length` 必须大于或等于这个值。
 
-`--control-hz 20`
+`--control-hz 30`
 
-机器人控制频率。`20` 表示每秒执行 20 个动作，也就是每步约 `0.05` 秒。
+机器人控制频率。默认 `30`，表示每秒执行 30 个动作，也就是每步约 `0.033` 秒。
 
 ### 异步预取参数
 
-`--prefetch-remaining 20`
+`--prefetch-remaining 28`
 
 当前 chunk 剩余多少步时，开始在后台推理下一段 action chunk。
 
@@ -116,14 +116,14 @@ prefetch_remaining >= ceil(模型平均推理耗时秒数 * control_hz) + 安全
 示例：
 
 ```text
-平均推理 0.4 秒，控制频率 20Hz -> 0.4 * 20 = 8，建议 --prefetch-remaining 12
-平均推理 0.8 秒，控制频率 20Hz -> 0.8 * 20 = 16，建议 --prefetch-remaining 20
-平均推理 1.2 秒，控制频率 20Hz -> 1.2 * 20 = 24，建议 --prefetch-remaining 28
+平均推理 0.4 秒，控制频率 30Hz -> 0.4 * 30 = 12，建议 --prefetch-remaining 16
+平均推理 0.8 秒，控制频率 30Hz -> 0.8 * 30 = 24，建议 --prefetch-remaining 28
+平均推理 1.2 秒，控制频率 30Hz -> 1.2 * 30 = 36，建议 --prefetch-remaining 40
 ```
 
 如果这个值太小，下一段 chunk 可能来不及返回，客户端会短暂保持最后一个动作。如果这个值太大，下一段 chunk 使用的 observation 会更早，状态滞后会变大。
 
-设置 `--prefetch-remaining 0` 可以关闭异步预取。
+默认 `--prefetch-remaining 0`，即关闭异步预取；显式设置正数才会开启。
 
 ### Chunk 边界平滑参数
 
@@ -158,12 +158,12 @@ prefetch_remaining >= ceil(模型平均推理耗时秒数 * control_hz) + 安全
 
 ## 4. 推荐初始参数
 
-如果模型平均推理耗时约 `0.8` 秒，控制频率为 `20Hz`，可以先使用：
+如果模型平均推理耗时约 `0.8` 秒，控制频率为 `30Hz`，可以先使用：
 
 ```bash
 --action-horizon 50 \
---control-hz 20 \
---prefetch-remaining 20 \
+--control-hz 30 \
+--prefetch-remaining 28 \
 --max-switch-delta 0.12 \
 --switch-blend-steps 5 \
 --max-delta-per-step 0.05
@@ -180,8 +180,8 @@ python scripts/run_xtrainer_real.py \
   --camera-left-wrist-serial LEFT_WRIST_SERIAL \
   --camera-right-wrist-serial RIGHT_WRIST_SERIAL \
   --action-horizon 50 \
-  --control-hz 20 \
-  --prefetch-remaining 20 \
+  --control-hz 30 \
+  --prefetch-remaining 28 \
   --max-switch-delta 0.12 \
   --switch-blend-steps 5 \
   --max-delta-per-step 0.05 \
