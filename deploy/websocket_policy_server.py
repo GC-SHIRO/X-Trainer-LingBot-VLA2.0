@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import traceback
+from typing import Callable
 
 from .msgpack_numpy import Packer, unpackb
 import websockets.asyncio.server as _server
@@ -24,11 +25,13 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        inference_callback: Callable[[dict, dict], None] | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._inference_callback = inference_callback
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -62,6 +65,12 @@ class WebsocketPolicyServer:
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
+
+                if self._inference_callback is not None:
+                    try:
+                        self._inference_callback(obs, action)
+                    except Exception:
+                        logger.exception("Inference callback failed; continuing to serve requests")
 
                 action["server_timing"] = {
                     "infer_ms": infer_time * 1000,

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deploy.websocket_client_policy import WebsocketClientPolicy
+from deploy.inference_logging import InferenceRecorder
 from deploy.xtrainer_real import XTrainerRealEnvironment
 
 
@@ -295,6 +296,11 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Optional final per-control-step action delta limit; <=0 disables this client-side limiter",
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Write raw policy requests/responses, input PNGs, and applied actions under ./log",
+    )
     return parser.parse_args()
 
 
@@ -330,7 +336,12 @@ def _validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     _validate_args(args)
-    policy = WebsocketClientPolicy(host=args.host, port=args.port)
+    recorder = InferenceRecorder("real") if args.log else None
+    policy = WebsocketClientPolicy(
+        host=args.host,
+        port=args.port,
+        inference_callback=recorder.record_inference if recorder is not None else None,
+    )
     metadata = policy.get_server_metadata()
     logging.info("Server metadata: %s", metadata)
     if metadata.get("model_type") not in (None, "lingbot-vla-2.0"):
@@ -363,8 +374,10 @@ def main() -> None:
     )
 
     action_chunk = np.empty((0, 14), dtype=np.float64)
+    action_chunk_source = "synchronous"
     action_index = 0
     next_chunk: np.ndarray | None = None
+    next_chunk_source: str | None = None
     prefetch_future: Future | None = None
     last_sent_action: np.ndarray | None = None
     period = 1.0 / args.control_hz
@@ -419,11 +432,14 @@ def main() -> None:
                         blend_steps=args.switch_blend_steps,
                     )
                     if args.prefetch_apply_mode == "replace":
+                        action_chunk_source = "prefetch-replace"
                         logging.info(
                             "Replaced current action chunk at step %d; discarded %d remaining actions",
                             step,
                             discarded_actions,
                         )
+                    else:
+                        next_chunk_source = "prefetch-boundary"
 
                 if action_index >= len(action_chunk):
                     if next_chunk is not None:
@@ -434,6 +450,8 @@ def main() -> None:
                             blend_steps=args.switch_blend_steps,
                         )
                         next_chunk = None
+                        action_chunk_source = next_chunk_source or "prefetch-boundary"
+                        next_chunk_source = None
                     elif prefetch_future is not None:
                         if last_sent_action is None:
                             logging.warning("Action chunk exhausted while prefetch is running and no last action is available")
@@ -441,6 +459,8 @@ def main() -> None:
                         logging.warning("Action chunk exhausted before prefetch finished; holding last action")
                         action = last_sent_action.copy()
                         environment.apply_action(action)
+                        if recorder is not None:
+                            recorder.record_applied_action(action, step=step, source="hold-for-prefetch")
                         deadline += period
                         remaining = deadline - time.monotonic()
                         if remaining > 0:
@@ -450,6 +470,7 @@ def main() -> None:
                         continue
                     else:
                         action_chunk = _infer_action_chunk(policy, environment.get_observation(), args.action_horizon)
+                        action_chunk_source = "synchronous"
                     action_index = 0
                     logging.info("Received %d actions at step %d", len(action_chunk), step)
 
@@ -492,14 +513,19 @@ def main() -> None:
                         )
 
                     action = _rate_limit_action(action_chunk[action_index], last_sent_action, args.max_delta_per_step)
+                    action_source = action_chunk_source
                     action_index += 1
                 elif last_sent_action is not None and prefetch_future is not None:
                     logging.warning("Action chunk exhausted before prefetch finished; holding last action")
                     action = last_sent_action.copy()
+                    action_source = "hold-for-prefetch"
                 else:
                     action = _infer_action_chunk(policy, environment.get_observation(), args.action_horizon)[0]
+                    action_source = "synchronous-fallback"
 
                 environment.apply_action(action)
+                if recorder is not None:
+                    recorder.record_applied_action(action, step=step, source=action_source)
                 last_sent_action = action.copy()
                 deadline += period
                 remaining = deadline - time.monotonic()
@@ -512,6 +538,8 @@ def main() -> None:
     finally:
         environment.close()
         policy.close()
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

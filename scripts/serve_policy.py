@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deploy.lingbot_vla_v2_policy import LingbotVLAv2Server
+from deploy.inference_logging import InferenceRecorder
 from deploy.websocket_policy_server import WebsocketPolicyServer
 
 
@@ -68,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fp32", action="store_true", help="Use float32 instead of bfloat16")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile for inference")
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Write raw policy requests, responses, and input PNGs under ./log",
+    )
     return parser.parse_args()
 
 
@@ -96,13 +102,19 @@ def main() -> None:
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s, port: %d)", hostname, local_ip, args.port)
+    recorder = InferenceRecorder("server") if args.log else None
     server = WebsocketPolicyServer(
         policy=policy,
         host=args.host,
         port=args.port,
         metadata=_build_server_metadata(args.robot),
+        inference_callback=recorder.record_inference if recorder is not None else None,
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

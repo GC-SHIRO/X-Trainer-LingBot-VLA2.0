@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from typing_extensions import override
 import websockets.sync.client
@@ -14,12 +14,19 @@ class WebsocketClientPolicy:
     See WebsocketPolicyServer for a corresponding server implementation.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: Optional[int] = None,
+        api_key: Optional[str] = None,
+        inference_callback: Optional[Callable[[Dict, Dict], None]] = None,
+    ) -> None:
         self._uri = f"ws://{host}"
         if port is not None:
             self._uri += f":{port}"
         self._packer = Packer()
         self._api_key = api_key
+        self._inference_callback = inference_callback
         self._ws, self._server_metadata = self._wait_for_server()
 
     def get_server_metadata(self) -> Dict:
@@ -54,7 +61,13 @@ class WebsocketClientPolicy:
         if isinstance(response, str):
             # we're expecting bytes; if the server sends a string, it's an error.
             raise RuntimeError(f"Error in inference server:\n{response}")
-        return unpackb(response)
+        result = unpackb(response)
+        if self._inference_callback is not None:
+            try:
+                self._inference_callback(obs, result)
+            except Exception:
+                logging.exception("Inference callback failed; continuing without interrupting control")
+        return result
 
     @override
     def reset(self, robo_name: str) -> None:

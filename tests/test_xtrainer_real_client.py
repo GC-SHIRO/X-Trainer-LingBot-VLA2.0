@@ -56,6 +56,7 @@ class ActionChunkTest(unittest.TestCase):
         self.assertEqual(args.action_horizon, 50)
         self.assertEqual(args.control_hz, 30.0)
         self.assertEqual(args.prefetch_remaining, 0)
+        self.assertFalse(args.log)
         self.assertTrue(math.isinf(args.max_joint_delta))
         self.assertEqual(args.gripper_update_threshold, 0.0)
         self.assertTrue(math.isinf(args.servo_step_limit))
