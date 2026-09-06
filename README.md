@@ -39,11 +39,12 @@ X-Trainer 硬件配置
 
 ### 2.2 项目分工
 
-| 模块           | 项目或目录                              | 职责                                                                    |
-| -------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+
+| 模块           | 项目或目录                            | 职责                                                                    |
+| ---------------- | --------------------------------------- | ------------------------------------------------------------------------- |
 | 控制与原始采集 | `dobot_xtrainer` / Pi0.5 配套采集项目 | follower、leader、夹爪与 RealSense 连接，遥操作和 raw episode 采集。    |
-| 数据转换       | Pi0.5 的 X-Trainer 转换链路             | 将 raw episode 转换为 LeRobot v2.1；LingBot 仓库不包含 raw 转换脚本。   |
-| 训练与模型     | 本仓库                                  | 数据映射、norm stats、LingBot-VLA 全参训练、checkpoint 导出和离线评估。 |
+| 数据转换       | Pi0.5 的 X-Trainer 转换链路           | 将 raw episode 转换为 LeRobot v2.1；LingBot 仓库不包含 raw 转换脚本。   |
+| 训练与模型     | 本仓库                                | 数据映射、norm stats、LingBot-VLA 全参训练、checkpoint 导出和离线评估。 |
 | 远程推理       | `scripts/serve_policy.py`             | 加载 checkpoint，提供 WebSocket policy 服务和健康检查。                 |
 | 真机执行       | `scripts/run_xtrainer_real.py`        | 采集三路图像和 14 维状态，消费 action chunk 并控制真机。                |
 
@@ -51,10 +52,11 @@ X-Trainer 硬件配置
 
 原始 LeRobot 样本必须包含：
 
-| 字段                               |        形状 | 含义                                       |
-| ---------------------------------- | ----------: | ------------------------------------------ |
-| `observation.state`              |   `(14,)` | 左臂 6 关节、左夹爪、右臂 6 关节、右夹爪。 |
-| `action`                         |   `(14,)` | 顺序与`observation.state` 相同。         |
+
+| 字段                             |        形状 | 含义                                       |
+| ---------------------------------- | ------------: | -------------------------------------------- |
+| `observation.state`              |     `(14,)` | 左臂 6 关节、左夹爪、右臂 6 关节、右夹爪。 |
+| `action`                         |     `(14,)` | 顺序与`observation.state` 相同。           |
 | `observation.images.top`         | image/video | 顶部相机 RGB 图像。                        |
 | `observation.images.left_wrist`  | image/video | 左腕相机 RGB 图像。                        |
 | `observation.images.right_wrist` | image/video | 右腕相机 RGB 图像。                        |
@@ -68,8 +70,9 @@ X-Trainer 硬件配置
 
 ### 3.1 硬件
 
+
 | 硬件                     | 数量 | 用途                                     |
-| ------------------------ | ---: | ---------------------------------------- |
+| -------------------------- | -----: | ------------------------------------------ |
 | Dobot follower 机械臂    |    2 | 左右从臂执行动作。                       |
 | X-Trainer leader 主手    |    2 | 人类遥操作输入。                         |
 | Feetech / X-Trainer 夹爪 |    2 | 左右夹爪控制。                           |
@@ -92,11 +95,12 @@ X-Trainer 硬件配置
 
 环境脚本以以下组合为基准：
 
+
 | 组件              | 版本或要求                    |
-| ----------------- | ----------------------------- |
+| ------------------- | ------------------------------- |
 | OS                | Ubuntu 24.04 LTS x86_64       |
 | Python            | 3.12                          |
-| NVIDIA Driver     | `>= 570.26`                 |
+| NVIDIA Driver     | `>= 570.26`                   |
 | PyTorch           | 2.8.0 + CUDA 12.8 wheels      |
 | Transformers      | 4.57.3                        |
 | Hugging Face Hub  | 0.34.3                        |
@@ -160,8 +164,9 @@ bash tools/download_base_models.sh
 
 脚本下载：
 
-| 资产               | 默认来源                        |
-| ------------------ | ------------------------------- |
+
+| 资产               | 默认来源                      |
+| -------------------- | ------------------------------- |
 | Qwen3-VL           | `Qwen/Qwen3-VL-4B-Instruct`   |
 | LingBot-VLA 2.0 6B | `robbyant/lingbot-vla-v2-6b`  |
 | MoGe-2             | `Ruicheng/moge-2-vitb-normal` |
@@ -208,14 +213,15 @@ LingBot 仓库不包含 leader 遥操作和 raw episode 采集程序。此阶段
 
 LingBot 训练入口读取 LeRobot 数据集，不能直接读取 X-Trainer raw episode。建议复用 Pi0.5 已验证的转换脚本，并保证以下映射：
 
-| raw 来源            | LeRobot 字段                       | 要求                        |
-| ------------------- | ---------------------------------- | --------------------------- |
-| `joint_positions` | `observation.state`              | `float32`，严格 14 维。   |
-| `control`         | `action`                         | `float32`，严格 14 维。   |
+
+| raw 来源          | LeRobot 字段                     | 要求                        |
+| ------------------- | ---------------------------------- | ----------------------------- |
+| `joint_positions` | `observation.state`              | `float32`，严格 14 维。     |
+| `control`         | `action`                         | `float32`，严格 14 维。     |
 | `topImg`          | `observation.images.top`         | RGB，帧号对齐。             |
 | `leftImg`         | `observation.images.left_wrist`  | RGB，帧号对齐。             |
 | `rightImg`        | `observation.images.right_wrist` | RGB，帧号对齐。             |
-| task 参数           | `task`                           | 每个 episode 保存语言任务。 |
+| task 参数         | `task`                           | 每个 episode 保存语言任务。 |
 
 转换后至少检查：
 
@@ -261,8 +267,9 @@ configs/vla/norm_compute/post_data.yaml
 
 训练前必须修改：
 
-| 配置                           | 说明                            |
-| ------------------------------ | ------------------------------- |
+
+| 配置                         | 说明                            |
+| ------------------------------ | --------------------------------- |
 | `model.model_path`           | LingBot-VLA base 模型目录。     |
 | `model.tokenizer_path`       | Qwen3-VL tokenizer/model 目录。 |
 | `data.train_path`            | LeRobot 数据集路径或数据清单。  |
@@ -327,19 +334,20 @@ ls -lh assets/norm_stats/xtrainer.json
 
 [`configs/vla/xtrainer/xtrainer.yaml`](configs/vla/xtrainer/xtrainer.yaml) 当前主要设置：
 
-| 参数                   |                       默认值 |
-| ---------------------- | ---------------------------: |
+
+| 参数                   |                     默认值 |
+| ------------------------ | ---------------------------: |
 | 精度                   | BF16；`enable_fp32: false` |
-| 数据并行               |             FSDP2 full shard |
-| Gradient checkpointing |                         开启 |
-| Optimizer              |                         Muon |
+| 数据并行               |           FSDP2 full shard |
+| Gradient checkpointing |                       开启 |
+| Optimizer              |                       Muon |
 | Learning rate          |           `5e-5`，constant |
 | Micro batch size       |                        `1` |
 | Gradient accumulation  |                        `1` |
 | Max steps              |                    `20000` |
 | Save interval          |                     `5000` |
-| Hugging Face 权重导出  |               开启，异步保存 |
-| `torch.compile`      |                     默认关闭 |
+| Hugging Face 权重导出  |             开启，异步保存 |
+| `torch.compile`        |                   默认关闭 |
 
 `global_batch_size` 按下式计算：
 
@@ -464,19 +472,20 @@ python scripts/serve_policy.py \
 
 常用参数：
 
-| 参数             |       默认值 | 说明                                              |
-| ---------------- | -----------: | ------------------------------------------------- |
-| `--model-path` |         必填 | 含`.safetensors` 的 checkpoint 目录。           |
-| `--robot`      | `xtrainer` | `configs/robot_configs` 下的配置名。            |
-| `--norm-path`  | 配置中的路径 | 覆盖 norm stats。                                 |
-| `--host`       |  `0.0.0.0` | 监听地址。                                        |
-| `--port`       |     `8000` | HTTP/WebSocket 端口。                             |
-| `--use-length` |       `50` | 每次返回的 action 数量。                          |
-| `--num-steps`  |       `10` | flow-matching denoising steps。                   |
-| `--step-mode`  |         关闭 | 每次只返回一个 action；真机 chunk client 不使用。 |
-| `--fp32`       |         关闭 | 默认 BF16，启用后使用 FP32。                      |
-| `--compile`    |         关闭 | 启用`torch.compile`。先完成 eager smoke test。  |
-| `--log`        |         关闭 | 将原始请求、模型输出和输入 PNG 写到当前目录的 `log/`。 |
+
+| 参数           |       默认值 | 说明                                                  |
+| ---------------- | -------------: | ------------------------------------------------------- |
+| `--model-path` |         必填 | 含`.safetensors` 的 checkpoint 目录。                 |
+| `--robot`      |   `xtrainer` | `configs/robot_configs` 下的配置名。                  |
+| `--norm-path`  | 配置中的路径 | 覆盖 norm stats。                                     |
+| `--host`       |    `0.0.0.0` | 监听地址。                                            |
+| `--port`       |       `8000` | HTTP/WebSocket 端口。                                 |
+| `--use-length` |         `50` | 每次返回的 action 数量。                              |
+| `--num-steps`  |         `10` | flow-matching denoising steps。                       |
+| `--step-mode`  |         关闭 | 每次只返回一个 action；真机 chunk client 不使用。     |
+| `--fp32`       |         关闭 | 默认 BF16，启用后使用 FP32。                          |
+| `--compile`    |         关闭 | 启用`torch.compile`。先完成 eager smoke test。        |
+| `--log`        |         关闭 | 将原始请求、模型输出和输入 PNG 写到当前目录的`log/`。 |
 
 健康检查：
 
@@ -558,8 +567,9 @@ python scripts/run_xtrainer_real.py \
 
 ### 13.5 安全与平滑默认值
 
-| 参数                           |   默认值 | 作用                                                           |
-| ------------------------------ | -------: | -------------------------------------------------------------- |
+
+| 参数                         | 默认值 | 作用                                                           |
+| ------------------------------ | -------: | ---------------------------------------------------------------- |
 | `--max-joint-delta`          |  `inf` | 默认不改写 policy 的关节目标；显式设置有限值时才触发平滑处理。 |
 | `--ramp-step`                | `0.01` | 平滑过渡步长。                                                 |
 | `--ramp-max-steps`           |  `100` | 平滑过渡最大步数。                                             |
@@ -567,7 +577,7 @@ python scripts/run_xtrainer_real.py \
 | `--servo-step-limit`         |  `inf` | 默认不限制 follower 的关节目标跳变。                           |
 | `--max-switch-delta`         | `0.12` | chunk 边界触发混合的阈值。                                     |
 | `--switch-blend-steps`       |    `5` | chunk 边界混合步数。                                           |
-| `--max-delta-per-step`       |    `0` | 最终逐步限幅；`0` 表示关闭。                                 |
+| `--max-delta-per-step`       |    `0` | 最终逐步限幅；`0` 表示关闭。                                   |
 
 客户端会拒绝错误形状、NaN 和 Inf，但无法判断数值有效的动作是否会在真实场景中碰撞。急停看护不能被软件检查替代。
 
@@ -639,8 +649,9 @@ python scripts/run_xtrainer_real.py \
 
 ## 15. 关键文件索引
 
-| 文件                                     | 作用                                           |
-| ---------------------------------------- | ---------------------------------------------- |
+
+| 文件                                   | 作用                                           |
+| ---------------------------------------- | ------------------------------------------------ |
 | `tools/create_environment`             | 创建固定版本的训练环境。                       |
 | `tools/download_base_models.sh`        | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2。         |
 | `configs/robot_configs/xtrainer.yaml`  | X-Trainer 字段、delta action 和相机映射。      |

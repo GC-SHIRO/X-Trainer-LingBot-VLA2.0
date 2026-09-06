@@ -74,6 +74,7 @@ train:
   num_train_epochs: null
   micro_batch_size: 1
   gradient_accumulation_steps: 1
+  global_batch_size: 8
   max_steps: 20000
   ckpt_manager: dcp
   save_steps: 5000
@@ -86,9 +87,9 @@ train:
   enable_activation_offload: false
   activation_gpu_limit: 8
   enable_resume: true
-  # Export an inference-ready safetensors checkpoint in addition to DCP.
-  save_hf_weights: true
-  async_save_hf_weights: true
+  # Keep training checkpoints in DCP format; export HF weights after training.
+  save_hf_weights: false
+  async_save_hf_weights: false
   align_params:
     mode: query
     num_task_tokens: 8

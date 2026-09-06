@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Download LingBot-VLA 2.0 base models ==="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODELS_DIR="$SCRIPT_DIR/models"
+MODELS_DIR="$(dirname "$SCRIPT_DIR")/models"
 mkdir -p "$MODELS_DIR"
 
 if ! command -v hf >/dev/null 2>&1; then
