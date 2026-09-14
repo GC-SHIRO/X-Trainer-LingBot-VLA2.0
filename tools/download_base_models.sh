@@ -155,6 +155,8 @@ download_repo "$SOURCE" "$LINGBOT_REPOSITORY" "$MODELS_DIR/lingbot-vla-v2-6b"
 
 # 3. MoGe-2 checkpoint expected by configs/vla/xtrainer/xtrainer.yaml.
 DEPTH_DIR="$MODELS_DIR/MoRGBD"
+MODEL_FILE="$DEPTH_DIR/model.pt"
+TARGET_FILE="$DEPTH_DIR/moge2-vitb-normal.pt"
 mkdir -p "$DEPTH_DIR"
 if [[ "$MOGE_SOURCE" != "$SOURCE" ]]; then
   echo "MoGe-2 ViT-B Normal is not published on ModelScope; downloading $MOGE_REPO from Hugging Face instead."
@@ -162,12 +164,36 @@ if [[ "$MOGE_SOURCE" != "$SOURCE" ]]; then
 fi
 echo "Downloading MoGe-2 ViT-B Normal from $MOGE_SOURCE..."
 download_file "$MOGE_SOURCE" "$MOGE_REPO" model.pt "$DEPTH_DIR"
-mv -f "$DEPTH_DIR/model.pt" "$DEPTH_DIR/moge2-vitb-normal.pt"
+
+# The hub client can materialize model.pt as a symlink into its own cache, and a
+# previous run may already have created the filename the configs expect. In that
+# case `mv` exits non-zero with "are the same file", so compare the files first
+# and keep this step idempotent.
+if [[ -e "$MODEL_FILE" ]]; then
+  if [[ "$MODEL_FILE" -ef "$TARGET_FILE" ]]; then
+    echo "MoGe-2 already published as $TARGET_FILE; removing the duplicate name $MODEL_FILE."
+    rm -f "$MODEL_FILE"
+  else
+    mv -f "$MODEL_FILE" "$TARGET_FILE"
+  fi
+fi
+
+# Resolve a cache symlink into a real file so the checkpoint survives copying or
+# moving the models directory to another disk.
+if [[ -L "$TARGET_FILE" ]]; then
+  echo "MoGe-2: replacing the symlink at $TARGET_FILE with a local copy of the weights."
+  cp -Lf "$TARGET_FILE" "$TARGET_FILE.local" && mv -f "$TARGET_FILE.local" "$TARGET_FILE"
+fi
+
+if [[ ! -f "$TARGET_FILE" ]]; then
+  echo "MoGe-2 checkpoint is missing at $TARGET_FILE" >&2
+  exit 1
+fi
 
 echo "All base models were downloaded to $MODELS_DIR"
 echo "  $MODELS_DIR/Qwen3-VL-4B-Instruct"
 echo "  $MODELS_DIR/lingbot-vla-v2-6b"
-echo "  $DEPTH_DIR/moge2-vitb-normal.pt"
+echo "  $TARGET_FILE"
 echo "These paths match the ./models/... entries in configs/vla/xtrainer/xtrainer.yaml."
 echo "Hugging Face mode: bash tools/download_base_models.sh"
 echo "ModelScope mode:   bash tools/download_base_models.sh --source modelscope"
