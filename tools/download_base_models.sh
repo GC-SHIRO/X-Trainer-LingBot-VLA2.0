@@ -9,6 +9,7 @@ set -euo pipefail
 #
 # Environment overrides:
 #   MODEL_SOURCE=<hf|modelscope>              used when --source is omitted
+#   MODELS_DIR=<path>                         output directory (default: <repo>/models)
 #   QWEN_REPOSITORY=<owner/repository>        Qwen3-VL repository
 #   LINGBOT_REPOSITORY=<owner/repository>     LingBot-VLA repository
 #   MOGE_REPOSITORY=<owner/repository>        MoGe-2 repository on Hugging Face
@@ -78,7 +79,10 @@ esac
 echo "=== Download LingBot-VLA 2.0 base models (source: $SOURCE) ==="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODELS_DIR="$(dirname "$SCRIPT_DIR")/models"
+# Default output is <repo>/models, which matches the ./models/... paths used by
+# configs/vla/xtrainer/xtrainer.yaml. Override with MODELS_DIR=<path> if needed.
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+MODELS_DIR="${MODELS_DIR:-$REPO_ROOT/models}"
 mkdir -p "$MODELS_DIR"
 
 if [[ "$SOURCE" == "hf" ]]; then
@@ -161,6 +165,10 @@ download_file "$MOGE_SOURCE" "$MOGE_REPO" model.pt "$DEPTH_DIR"
 mv -f "$DEPTH_DIR/model.pt" "$DEPTH_DIR/moge2-vitb-normal.pt"
 
 echo "All base models were downloaded to $MODELS_DIR"
+echo "  $MODELS_DIR/Qwen3-VL-4B-Instruct"
+echo "  $MODELS_DIR/lingbot-vla-v2-6b"
+echo "  $DEPTH_DIR/moge2-vitb-normal.pt"
+echo "These paths match the ./models/... entries in configs/vla/xtrainer/xtrainer.yaml."
 echo "Hugging Face mode: bash tools/download_base_models.sh"
 echo "ModelScope mode:   bash tools/download_base_models.sh --source modelscope"
 echo "Override repositories with LINGBOT_REPOSITORY / MOGE_REPOSITORY / MOGE_MODELSCOPE_REPOSITORY."

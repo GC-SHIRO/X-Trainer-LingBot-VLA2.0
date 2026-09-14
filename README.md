@@ -204,12 +204,23 @@ MOGE_REPOSITORY=<owner/repository> \
 bash tools/download_base_models.sh
 ```
 
-注意：当前下载脚本写入 `tools/models/`，而 [`configs/vla/xtrainer/xtrainer.yaml`](configs/vla/xtrainer/xtrainer.yaml) 默认读取仓库根目录下的 `./models/`。训练前必须选择一种方式统一路径：
+下载脚本默认把权重写入**仓库根目录的 `models/`**，与 [`configs/vla/xtrainer/xtrainer.yaml`](configs/vla/xtrainer/xtrainer.yaml) 读取的 `./models/...` 一致，因此下载完成后无需再改 YAML。实际目录布局：
 
-1. 将 YAML 中所有 `./models/...` 改成 `./tools/models/...`；或
-2. 将完整模型目录放到仓库根目录的 `models/`。
+```text
+<repo>/models/Qwen3-VL-4B-Instruct/
+<repo>/models/lingbot-vla-v2-6b/
+<repo>/models/MoRGBD/moge2-vitb-normal.pt
+```
 
-还需同时核对 tokenizer、MoRGBD、depth 和 Video-DINO 路径，不能只修改 `model.model_path`。
+对应 YAML 中的 `model.model_path`、`model.tokenizer_path`、`align_params.depth.moge_path`、`align_params.depth.morgbd_path`、`align_params.video.ckpt_path` 和 `align_params.video.config_path`。脚本结束时打印的绝对路径可用于核对。
+
+如需改到其他磁盘，可用 `MODELS_DIR` 覆盖，同时必须同步修改 YAML 中所有 `./models/...`：
+
+```bash
+MODELS_DIR=/data/models bash tools/download_base_models.sh
+```
+
+`train.sh` 会设置 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`，路径不一致时不会自动联网兜底，所以这些路径必须逐项确认，不能只看 `model.model_path`。
 
 ---
 
@@ -642,7 +653,7 @@ python scripts/run_xtrainer_real.py \
 
 ### 14.1 环境脚本通过，但训练找不到模型
 
-原因通常是下载脚本输出 `tools/models/`，YAML 却读取 `./models/`。统一所有模型、tokenizer、depth 和 video 路径。
+下载脚本默认写入仓库根目录 `models/`，与 YAML 的 `./models/...` 一致；出现该问题通常是因为手工移动过模型目录、在仓库外的目录执行了脚本，或改过 YAML 路径。逐项确认 `model.model_path`、`model.tokenizer_path`、`align_params.depth.moge_path`、`align_params.depth.morgbd_path`、`align_params.video.ckpt_path` 和 `align_params.video.config_path` 是否指向实际存在的文件。`train.sh` 设置了 `HF_HUB_OFFLINE=1`，不会联网兜底。
 
 ### 14.2 LeRobot 数据加载失败
 
