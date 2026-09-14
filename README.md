@@ -165,16 +165,43 @@ bash tools/download_base_models.sh
 脚本下载：
 
 
-| 资产               | 默认来源                      |
-| -------------------- | ------------------------------- |
-| Qwen3-VL           | `Qwen/Qwen3-VL-4B-Instruct`   |
-| LingBot-VLA 2.0 6B | `robbyant/lingbot-vla-v2-6b`  |
-| MoGe-2             | `Ruicheng/moge-2-vitb-normal` |
+| 资产               | Hugging Face 默认来源          | ModelScope 默认来源              |
+| -------------------- | -------------------------------- | ---------------------------------- |
+| Qwen3-VL           | `Qwen/Qwen3-VL-4B-Instruct`    | `Qwen/Qwen3-VL-4B-Instruct`      |
+| LingBot-VLA 2.0 6B | `robbyant/lingbot-vla-v2-6b`   | `Robbyant/lingbot-vla-v2-6b`     |
+| MoGe-2             | `Ruicheng/moge-2-vitb-normal`  | 无官方发布，回退到 Hugging Face  |
 
-可覆盖 LingBot 仓库：
+可选下载源：
+
+```bash
+# Hugging Face（默认）
+bash tools/download_base_models.sh --source hf
+
+# ModelScope
+pip install -U modelscope
+bash tools/download_base_models.sh --source modelscope
+
+# 等价写法
+bash tools/download_base_models_modelscope.sh
+
+# 也可通过环境变量指定默认来源
+MODEL_SOURCE=modelscope bash tools/download_base_models.sh
+```
+
+ModelScope 尚未发布 `Ruicheng/moge-2-vitb-normal`，因此 `--source modelscope` 仍会用 Hugging Face 客户端下载该权重（需同时安装 `huggingface_hub`）。如已有 ModelScope 上的等价镜像，可显式指定：
+
+```bash
+MOGE_MODELSCOPE_REPOSITORY=<owner/repository> \
+bash tools/download_base_models.sh --source modelscope
+```
+
+可覆盖各仓库 ID：
 
 ```bash
 LINGBOT_REPOSITORY=<owner/repository> bash tools/download_base_models.sh
+QWEN_REPOSITORY=<owner/repository> \
+MOGE_REPOSITORY=<owner/repository> \
+bash tools/download_base_models.sh
 ```
 
 注意：当前下载脚本写入 `tools/models/`，而 [`configs/vla/xtrainer/xtrainer.yaml`](configs/vla/xtrainer/xtrainer.yaml) 默认读取仓库根目录下的 `./models/`。训练前必须选择一种方式统一路径：
@@ -653,7 +680,8 @@ python scripts/run_xtrainer_real.py \
 | 文件                                   | 作用                                           |
 | ---------------------------------------- | ------------------------------------------------ |
 | `tools/create_environment`             | 创建固定版本的训练环境。                       |
-| `tools/download_base_models.sh`        | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2。         |
+| `tools/download_base_models.sh`        | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2（支持 HF / ModelScope）。 |
+| `tools/download_base_models_modelscope.sh` | 上述脚本的 ModelScope 便捷入口。           |
 | `configs/robot_configs/xtrainer.yaml`  | X-Trainer 字段、delta action 和相机映射。      |
 | `configs/vla/xtrainer/xtrainer.yaml`   | X-Trainer 全参训练配置。                       |
 | `scripts/compute_norm_stats.py`        | 计算 normalization statistics。                |
