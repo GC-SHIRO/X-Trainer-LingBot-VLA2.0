@@ -30,6 +30,7 @@ TRANSFORMERS_VERSION="4.57.3"
 HUGGINGFACE_HUB_VERSION="0.34.3"
 FLASH_ATTN_VERSION="2.8.3"
 LEROBOT_VERSION="0.4.2"
+WANDB_VERSION="0.21.0"
 MIN_DRIVER_VERSION="570.26"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,6 +76,7 @@ Create the complete LingBot-VLA 2.0 Python environment for Ubuntu 24.04:
   - Transformers 4.57.3 / Hugging Face Hub 0.34.3
   - FlashAttention 2.8.3
   - LeRobot 0.4.2 without its incompatible dependency metadata
+  - wandb 0.21.0 for training logs (TensorBoard 2.16.2 is installed as well)
   - LingBot depth, MoGe, and their runtime dependencies
 
 The script does not install OS packages, NVIDIA drivers/CUDA toolkit, models,
@@ -339,6 +341,7 @@ expected = {
     "tokenizers": "0.22.2",
     "huggingface-hub": "0.34.3",
     "triton": "3.4.0",
+    "wandb": "0.21.0",
 }
 
 for package, wanted in expected.items():
@@ -425,6 +428,7 @@ import torch
 import transformers
 import trimesh
 import utils3d
+import wandb
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from mdm.model.v2 import MDMModel
 from moge.model.v2 import MoGeModel
@@ -437,6 +441,7 @@ assert "flash_attention_2" in ALL_ATTENTION_FUNCTIONS
 print("transformers", transformers.__version__)
 print("huggingface_hub", huggingface_hub.__version__)
 print("accelerate", accelerate.__version__)
+print("wandb", wandb.__version__)
 print("Qwen3-VL and LingBot depth imports ok")
 print("GPU", torch.cuda.get_device_name(0))
 PY
@@ -559,6 +564,11 @@ log "restoring the pinned LingBot-VLA core stack"
 python -m pip install --no-cache-dir -r "${REPO_ROOT}/requirements.txt"
 python -m pip install --no-cache-dir --no-deps "numpydantic==1.9.0"
 python -m pip install --no-cache-dir "huggingface-hub==${HUGGINGFACE_HUB_VERSION}"
+
+# tasks/vla/train_lingbotvla.py imports wandb unconditionally, so the tracker
+# client must stay installed even when train.use_wandb is false.
+log "installing the pinned Weights & Biases client"
+python -m pip install --no-cache-dir "wandb==${WANDB_VERSION}"
 assert_core_stack
 stage_done
 

@@ -54,6 +54,37 @@ logger = helper.create_logger(__name__)
 # except Exception as e:
 #     logger.info_rank0(f"Failed to import aistudio_tracking: {repr(e)}.")
 
+
+class WandbScalarMirror:
+    """Forward calls to a TensorBoard writer while mirroring scalars for wandb.
+
+    The training loop reports everything through ``writer.add_scalar``, so wrapping
+    the writer keeps TensorBoard and wandb in sync from a single source of truth.
+    Non-scalar payloads (histograms, expert bar charts, ...) are forwarded untouched
+    and remain TensorBoard-only.
+    """
+
+    def __init__(self, writer: Any) -> None:
+        self._writer = writer
+        self._scalars: Dict[str, float] = {}
+
+    def add_scalar(self, tag: str, value: Any, step: int) -> None:
+        self._writer.add_scalar(tag, value, step)
+        try:
+            self._scalars[tag] = float(value)
+        except Exception:
+            # Multi-element tensors and other non-scalars cannot be logged as scalars.
+            pass
+
+    def pop_scalars(self) -> Dict[str, float]:
+        """Return the scalars accumulated since the last call and reset the buffer."""
+        scalars, self._scalars = self._scalars, {}
+        return scalars
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+
 def get_param_groups(model: "torch.nn.Module", default_lr: float, vit_lr: float):
     vit_params, other_params = [], []
     for name, param in model.named_parameters():
@@ -578,11 +609,19 @@ def main():
     if args.train.global_rank == 0:
         log_dir=f"{args.train.output_dir}/runs/"
         writer = AsyncTBWriter(log_dir=log_dir)
+        wandb_run = None
         if args.train.use_wandb:
-            wandb.init(
-                name=args.train.wandb_name,
-                config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
-            )
+            try:
+                wandb_run = wandb.init(
+                    project=args.train.wandb_project,
+                    name=args.train.wandb_name,
+                    config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
+                )
+                # Mirror the TensorBoard scalars so both backends report identical curves.
+                writer = WandbScalarMirror(writer)
+            except Exception as exc:
+                logger.info_rank0(f"wandb.init failed; continuing with TensorBoard only: {exc!r}")
+                wandb_run = None
 
         if args.train.enable_profiling:
             profiler = helper.create_profiler(
@@ -1056,6 +1095,15 @@ def main():
                         mean_loss = sum(values) / len(values)
                         writer.add_scalar(f"detailed_loss/{name}", mean_loss, global_step)
 
+                # Push everything logged this step to wandb, using the same tags as TensorBoard.
+                if wandb_run is not None:
+                    try:
+                        wandb_run.log(writer.pop_scalars(), step=global_step)
+                    except Exception as exc:
+                        # Never let experiment tracking break a long training run.
+                        logger.info_rank0(f"wandb.log failed; disabling wandb for the rest of the run: {exc!r}")
+                        wandb_run = None
+
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:
                     profiler.step()
                     if global_step == args.train.profile_end_step:
@@ -1203,6 +1251,8 @@ def main():
     if max_steps_driven:
         data_loader_tqdm.close()
     if args.train.global_rank == 0:
+        if wandb_run is not None:
+            wandb_run.finish()
         writer.close()
     torch.cuda.synchronize()
     # release memory

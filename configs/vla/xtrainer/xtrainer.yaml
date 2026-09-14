@@ -57,7 +57,10 @@ train:
   # Keep the default eager for a reproducible first run. Enable compile only
   # after a short smoke test has completed successfully on the target cluster.
   use_compile: false
-  use_wandb: false
+  # Log to wandb in addition to TensorBoard (train.output_dir/runs). Rank 0 only.
+  # Use WANDB_MODE=offline on clusters without internet access, or pass
+  # --train.use_wandb false to fall back to TensorBoard only.
+  use_wandb: true
   rmpad: false
   rmpad_with_pos_ids: false
   ulysses_parallel_size: 1
@@ -71,10 +74,20 @@ train:
   lr_decay_style: constant
   # max_steps is the sole stop condition. Keeping this null avoids an
   # accidental 29,000-epoch run if max_steps is removed in an override.
+  # Effective epochs = max_steps * global_batch_size / dataset_samples, so size
+  # max_steps as ceil(target_epochs * dataset_samples / global_batch_size).
   num_train_epochs: null
+  # 8x A100 40GB: keep one sample per micro batch (a triple-camera sample plus the
+  # future-frame alignment already dominates the step) and grow the effective batch
+  # with gradient accumulation instead. The training loop issues one backward per
+  # micro batch, so accumulation costs wall-clock time but does not raise peak
+  # activation memory.
   micro_batch_size: 1
-  gradient_accumulation_steps: 1
-  global_batch_size: 8
+  gradient_accumulation_steps: 8
+  # Must stay equal to micro_batch_size * data_parallel_size *
+  # gradient_accumulation_steps (= 1 * 8 GPUs * 8 = 64); TrainingArguments raises
+  # at startup when these disagree.
+  global_batch_size: 64
   max_steps: 20000
   ckpt_manager: dcp
   save_steps: 5000
@@ -83,13 +96,17 @@ train:
   # fallback when BF16 has been validated as insufficient.
   enable_fp32: false
   # CPU activation offload is a memory fallback and substantially slows an
-  # otherwise well-provisioned multi-GPU run.
+  # otherwise well-provisioned multi-GPU run. On 40GB cards this is the first knob
+  # to flip when the smoke test OOMs -- before touching micro_batch_size, which is
+  # already at its minimum.
   enable_activation_offload: false
   activation_gpu_limit: 8
   enable_resume: true
-  # Keep training checkpoints in DCP format; export HF weights after training.
-  save_hf_weights: false
-  async_save_hf_weights: false
+  # Keep resumable training checkpoints in DCP format and additionally export
+  # Hugging Face safetensors: scripts/serve_policy.py globs *.safetensors in the
+  # checkpoint directory, so a DCP-only checkpoint cannot be served.
+  save_hf_weights: true
+  async_save_hf_weights: true
   align_params:
     mode: query
     num_task_tokens: 8

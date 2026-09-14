@@ -106,6 +106,7 @@ X-Trainer 硬件配置
 | Hugging Face Hub  | 0.34.3                        |
 | FlashAttention    | 2.8.3                         |
 | LeRobot Python 包 | 0.4.2                         |
+| Weights & Biases  | 0.21.0                        |
 | GPU               | Compute Capability 8.0 或更高 |
 
 LeRobot Python 包版本 `0.4.2` 与 LeRobot 数据集格式 `v2.1` 是两个概念，不要混用版本号。
@@ -381,19 +382,57 @@ ls -lh assets/norm_stats/xtrainer.json
 | Optimizer              |                       Muon |
 | Learning rate          |           `5e-5`，constant |
 | Micro batch size       |                        `1` |
-| Gradient accumulation  |                        `1` |
+| Gradient accumulation  |                        `8` |
+| Global batch size      |                       `64` |
 | Max steps              |                    `20000` |
 | Save interval          |                     `5000` |
 | Hugging Face 权重导出  |             开启，异步保存 |
 | `torch.compile`        |                   默认关闭 |
+| W&B 日志               |     开启，与 TensorBoard 同源 |
 
-`global_batch_size` 按下式计算：
+上表数值按 **8 张 A100 40GB**（`data_parallel_size=8`，`ulysses_parallel_size=1`）填写。`global_batch_size` 不是自由参数，必须严格等于下式，否则 `TrainingArguments` 在启动时直接抛 `ValueError`：
 
 ```text
-micro_batch_size * data_parallel_size * gradient_accumulation_steps
+global_batch_size = micro_batch_size * data_parallel_size * gradient_accumulation_steps
+                  = 1 * 8 * 8 = 64
 ```
 
-### 9.2 配置检查
+`micro_batch_size` 保持 `1`：单样本含三路相机、未来帧对齐和 36 层 MoE，本身已占满一个 step 的显存，40GB 卡上没有翻倍空间。扩大有效 batch 只能靠 `gradient_accumulation_steps`，而训练循环是按 micro batch 逐个 `backward()` 的（`tasks/vla/train_lingbotvla.py`），所以累积只增加wall-clock 时间，不增加激活显存。改动 `gradient_accumulation_steps` 后必须同步 `global_batch_size`，否则启动即失败。
+
+### 9.2 训练轮次与 batch size 的关系
+
+配置固定使用 `max_steps` 作为唯一停止条件（`num_train_epochs: null`），因此**轮次是由 steps 反推出来的**。每 epoch 的优化步数为 `floor(N / global_batch_size)`，其中 `N` 为数据集样本数（`floor` 因为 `data.drop_last` 默认为 `true`）：
+
+```text
+有效轮次 = max_steps * global_batch_size / N
+
+max_steps = ceil(目标轮次 * N / global_batch_size)
+```
+
+按 `global_batch_size = 64` 换算，便于把默认的 `max_steps: 20000` 调成目标轮次：
+
+| 数据集样本数 N | 20000 步对应的轮次 | 想跑 2 轮时的 max_steps |
+| ---------------- | -------------------: | ------------------------: |
+| 50,000         |                 25.6 |                      1563 |
+| 200,000        |                  6.4 |                      6250 |
+| 640,000        |                  2.0 |                     20000 |
+| 1,280,000      |                  1.0 |                     40000 |
+
+X-Trainer 这类遥操作数据集规模通常在几千条 episode 量级，`max_steps: 20000` 很可能对应十几轮甚至更多，容易过拟合。**先量出 `N`（`len(dataset)` 或数据集 `meta/info.json` 的 `total_frames`），再按上表取 `max_steps`**，并保持 `save_steps` 能在一轮内至少落一次 checkpoint。
+
+### 9.3 40GB 显存下的调整顺序
+
+40GB 比手册推荐的 80GB 紧张，先按 smoke test 实测，再按以下顺序逐项调整，**每次只改一个变量**：
+
+1. 先跑 9.5 的 smoke training 拿真实峰值显存，不要凭估算决定。
+2. 确认 `enable_gradient_checkpointing: true` 生效（默认已开）。
+3. OOM 时把 `enable_activation_offload` 改为 `true`：这是既有的显存兜底开关，代价是明显变慢。`micro_batch_size` 已经是 `1`，没有下降空间。
+4. 仍 OOM 再考虑 `data.num_workers`（8 卡 × 4 worker，只影响数据加载，不影响显存）和检查是否误开了 `use_compile`。
+5. 不要靠下调 `global_batch_size` 硬凑：它与 `gradient_accumulation_steps` 强绑定，改了要一起改；需要更小的有效 batch 时应同时降低二者。
+
+本节所有数值都是配置层面的推导，**显存是否真的够必须由本机 smoke training 复核**。
+
+### 9.4 配置检查
 
 先逐项修改 YAML 中的占位路径：
 
@@ -403,21 +442,36 @@ grep -nE '/path/to|\./models' configs/vla/xtrainer/xtrainer.yaml
 
 确保命令没有输出未处理的 `/path/to/...`。`./models` 若保留，则对应资产必须实际位于仓库根目录 `models/`。
 
-### 9.3 Smoke training
+### 9.5 Smoke training
 
-首次仅运行少量 step，并写入独立目录：
+首次仅运行少量 step，并写入独立目录。**用与正式训练相同的 8 张卡**，否则显存结论没有参考价值：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash train.sh tasks/vla/train_lingbotvla.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+bash train.sh tasks/vla/train_lingbotvla.py \
   ./configs/vla/xtrainer/xtrainer.yaml \
   --train.output_dir /path/to/save_ckpt/xtrainer_smoke \
   --train.max_steps 10 \
   --train.save_steps 10
 ```
 
-如果单机可见 GPU 数与上例不同，修改 `CUDA_VISIBLE_DEVICES`。smoke test 应确认：数据能读取、三路视频能解码、norm stats 能加载、loss 有限、反向传播无 OOM、最终能导出 checkpoint。
+smoke test 应确认：数据能读取、三路视频能解码、norm stats 能加载、loss 有限、反向传播无 OOM、最终能导出 checkpoint（含 `.safetensors`）。
 
-### 9.4 正式训练
+注意 `global_batch_size` 与卡数强绑定，**换卡做 smoke 时必须同步改 batch 参数**，否则启动即抛 `ValueError`。例如只想用 2 张卡试跑：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 bash train.sh tasks/vla/train_lingbotvla.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --train.output_dir /path/to/save_ckpt/xtrainer_smoke \
+  --train.gradient_accumulation_steps 8 \
+  --train.global_batch_size 16 \
+  --train.max_steps 10 \
+  --train.save_steps 10
+```
+
+2 卡的 FSDP 切分更粗，每卡静态显存（参数、梯度、优化器状态）约为 8 卡的 4 倍，而激活显存与卡数无关。所以 2 卡能跑通说明激活放得下，8 卡基本也没问题；但 2 卡 OOM 常常是静态显存造成的，不能据此判定 8 卡不行。显存结论只在目标卡数下才完全有效。
+
+### 9.6 正式训练
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -436,7 +490,7 @@ bash train.sh tasks/vla/train_lingbotvla.py \
   ./configs/vla/xtrainer/xtrainer.yaml
 ```
 
-### 9.5 Checkpoint 检查
+### 9.7 Checkpoint 检查
 
 用于推理的 checkpoint 目录必须包含一个或多个 `.safetensors` 文件。推理代码还会按以下关系寻找训练配置：
 
@@ -451,6 +505,41 @@ find /path/to/checkpoint -maxdepth 1 -name '*.safetensors' -print
 ```
 
 若训练配置不在代码要求的位置，应调整 checkpoint 目录或训练产物布局，不能只复制 `.safetensors` 文件。
+
+### 9.8 W&B 日志
+
+`configs/vla/xtrainer/xtrainer.yaml` 默认开启 `use_wandb: true`，由 rank 0 同时写两处：
+
+
+| 后端        | 位置                                       | 内容                                                    |
+| ------------- | -------------------------------------------- | --------------------------------------------------------- |
+| TensorBoard | `<train.output_dir>/runs/`                 | 全部 scalar，以及 MoE 专家选择直方图/柱状图（Images）。 |
+| W&B         | `train.wandb_project`（默认 `lingbotvla`） | 每个 step 的全部 scalar，tag 与 TensorBoard 一致。      |
+
+首次使用先登录，或通过环境变量提供 API key：
+
+```bash
+wandb login
+# 或者
+export WANDB_API_KEY=<your-key>
+```
+
+常用覆盖方式：
+
+```bash
+# 关闭 W&B，回到纯 TensorBoard
+bash train.sh tasks/vla/train_lingbotvla.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --train.use_wandb false
+
+# 指定 project 与 run 名称
+bash train.sh tasks/vla/train_lingbotvla.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --train.wandb_project xtrainer-vla \
+  --train.wandb_name xtrainer-finetune
+```
+
+无外网的训练机可设置 `WANDB_MODE=offline` 先本地落盘，事后 `wandb sync` 补传。`wandb.init` 或 `wandb.log` 失败不会中断训练，只会退回 TensorBoard。MoE 专家选择直方图/柱状图仅写 TensorBoard，W&B 只有 scalar 曲线。
 
 ---
 
