@@ -1,6 +1,4 @@
 import argparse
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 import logging
 import sys
 import time
@@ -17,10 +15,7 @@ from deploy.inference_logging import InferenceRecorder
 from deploy.xtrainer_real import XTrainerRealEnvironment
 
 
-@dataclass
-class PrefetchResult:
-    actions: np.ndarray
-    request_step: int
+JOINT_INDICES = np.r_[0:6, 7:13]
 
 
 def _servo_range(value: str) -> tuple[int, int]:
@@ -56,135 +51,63 @@ def _rate_limit_action(action: np.ndarray, last_action: np.ndarray | None, max_d
     return previous + np.clip(target - previous, -max_delta_per_step, max_delta_per_step)
 
 
-def _smooth_chunk_boundary(
-    chunk: np.ndarray,
-    last_action: np.ndarray | None,
-    *,
-    max_switch_delta: float,
+def _chunk_blend_offset(last_sent_action: np.ndarray | None, first_action: np.ndarray) -> np.ndarray | None:
+    """Offset between where the arm is and where the new chunk starts.
+
+    Captured once per chunk from the last *applied* action, before any blending
+    is applied to it.
+    """
+    if last_sent_action is None:
+        return None
+    return np.asarray(last_sent_action, dtype=np.float64).reshape(-1) - np.asarray(
+        first_action, dtype=np.float64
+    ).reshape(-1)
+
+
+def _blend_chunk_action(
+    action: np.ndarray,
+    blend_offset: np.ndarray | None,
+    index: int,
     blend_steps: int,
 ) -> np.ndarray:
-    smoothed = np.asarray(chunk, dtype=np.float64).copy()
-    if last_action is None or len(smoothed) == 0 or max_switch_delta <= 0:
-        return smoothed
+    """Decay the chunk-splice offset over the first actions of a new chunk.
 
-    previous = np.asarray(last_action, dtype=np.float64).reshape(-1)
-    delta = float(np.max(np.abs(smoothed[0] - previous)))
-    if delta <= max_switch_delta:
-        return smoothed
+    Only a constant offset is faded out, so the new trajectory's own motion is
+    preserved while the splice discontinuity disappears. Grippers are never
+    blended, so an open/close command is not smeared by the transition.
+    """
+    target = np.asarray(action, dtype=np.float64).copy()
+    if blend_offset is None or blend_steps <= 1 or index >= blend_steps:
+        return target
+    progress = float(index + 1) / float(blend_steps)
+    weight = progress * progress * (3.0 - 2.0 * progress)
+    target[JOINT_INDICES] += (1.0 - weight) * blend_offset[JOINT_INDICES]
+    return target
 
-    steps = min(max(blend_steps, 1), len(smoothed))
-    for index in range(steps):
-        weight = float(index + 1) / float(steps + 1)
-        smoothed[index] = previous + weight * (smoothed[index] - previous)
-    logging.warning(
-        "Blended action chunk boundary: max delta %.4f exceeded threshold %.4f over %d steps",
-        delta,
-        max_switch_delta,
-        steps,
+
+def _hold_action_from_observation(observation: dict) -> np.ndarray:
+    """Measured pose to command as a stationary hold while the next chunk is inferred."""
+    if "observation.state" not in observation:
+        raise KeyError("Missing 'observation.state' in client observation")
+    state = np.asarray(observation["observation.state"], dtype=np.float64).reshape(-1).copy()
+    if state.shape[0] != 14:
+        raise ValueError(f"Expected observation.state length 14, got {state.shape[0]}")
+    if not np.all(np.isfinite(state)):
+        raise ValueError("observation.state contains non-finite values")
+    return state
+
+
+def _log_server_timing(response: dict) -> None:
+    timing = response.get("server_timing")
+    if not isinstance(timing, dict):
+        return
+    infer_ms = timing.get("infer_ms")
+    prev_total_ms = timing.get("prev_total_ms")
+    logging.info(
+        "Server timing: infer=%.1f ms, previous round trip=%.1f ms",
+        infer_ms if infer_ms is not None else float("nan"),
+        prev_total_ms if prev_total_ms is not None else float("nan"),
     )
-    return smoothed
-
-
-def _infer_action_chunk(policy: WebsocketClientPolicy, observation: dict, action_horizon: int) -> np.ndarray:
-    response = policy.infer(observation)
-    return _extract_action_chunk(response, action_horizon)
-
-
-def _infer_prefetch_chunk(
-    policy: WebsocketClientPolicy,
-    observation: dict,
-    action_horizon: int,
-    request_step: int,
-) -> PrefetchResult:
-    return PrefetchResult(
-        actions=_infer_action_chunk(policy, observation, action_horizon),
-        request_step=request_step,
-    )
-
-
-def _with_projected_state(observation: dict, projected_state: np.ndarray | None) -> dict:
-    if projected_state is None:
-        return observation
-    projected = dict(observation)
-    projected["observation.state"] = np.asarray(projected_state, dtype=np.float32).copy()
-    return projected
-
-
-def _project_chunk_end_state(
-    action_chunk: np.ndarray,
-    action_index: int,
-    last_sent_action: np.ndarray | None,
-    max_delta_per_step: float,
-) -> np.ndarray | None:
-    if action_index >= len(action_chunk):
-        return last_sent_action.copy() if last_sent_action is not None else None
-
-    if max_delta_per_step <= 0 or last_sent_action is None:
-        return np.asarray(action_chunk[-1], dtype=np.float64).copy()
-
-    projected = np.asarray(last_sent_action, dtype=np.float64).copy()
-    for action in action_chunk[action_index:]:
-        projected = _rate_limit_action(action, projected, max_delta_per_step)
-    return projected
-
-
-def _apply_prefetched_chunk(
-    action_chunk: np.ndarray,
-    action_index: int,
-    next_chunk: np.ndarray | None,
-    prefetched_chunk: np.ndarray,
-    last_sent_action: np.ndarray | None,
-    *,
-    apply_mode: str,
-    max_switch_delta: float,
-    blend_steps: int,
-) -> tuple[np.ndarray, int, np.ndarray | None, int]:
-    if apply_mode == "replace":
-        discarded_actions = max(len(action_chunk) - action_index, 0)
-        return (
-            _smooth_chunk_boundary(
-                prefetched_chunk,
-                last_sent_action,
-                max_switch_delta=max_switch_delta,
-                blend_steps=blend_steps,
-            ),
-            0,
-            None,
-            discarded_actions,
-        )
-    if apply_mode == "boundary":
-        return action_chunk, action_index, prefetched_chunk, 0
-    raise ValueError(f"Unsupported prefetch apply mode: {apply_mode}")
-
-
-def _align_prefetched_chunk(
-    prefetched_chunk: np.ndarray,
-    request_step: int,
-    current_step: int,
-    last_sent_action: np.ndarray | None = None,
-    *,
-    mode: str = "nearest",
-    search_window: int = 12,
-) -> tuple[np.ndarray, int]:
-    elapsed_steps = max(int(current_step - request_step), 0)
-    if elapsed_steps >= len(prefetched_chunk):
-        return np.empty((0, prefetched_chunk.shape[1]), dtype=np.float64), elapsed_steps
-
-    start_index = elapsed_steps
-    if mode == "elapsed":
-        pass
-    elif mode == "nearest":
-        if last_sent_action is not None and len(prefetched_chunk) > 0:
-            search_start = elapsed_steps
-            search_end = min(len(prefetched_chunk), elapsed_steps + max(search_window, 1) + 1)
-            candidates = np.asarray(prefetched_chunk[search_start:search_end], dtype=np.float64)
-            previous = np.asarray(last_sent_action, dtype=np.float64).reshape(1, -1)
-            distances = np.max(np.abs(candidates - previous), axis=1)
-            start_index = search_start + int(np.argmin(distances))
-    else:
-        raise ValueError(f"Unsupported prefetch alignment mode: {mode}")
-
-    return np.asarray(prefetched_chunk[start_index:], dtype=np.float64).copy(), start_index
 
 
 def parse_args() -> argparse.Namespace:
@@ -228,73 +151,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional follower joint jump limit in radians; default disables it",
     )
     parser.add_argument(
-        "--prefetch-remaining",
+        "--chunk-blend-steps",
         type=int,
-        default=0,
-        help="Start background inference when this many actions remain in the current chunk; default disables prefetch",
-    )
-    parser.add_argument(
-        "--prefetch-state-mode",
-        choices=("chunk-end", "current"),
-        default="current",
-        help=(
-            "State used in the observation sent by async prefetch. "
-            "'chunk-end' replaces observation.state with the planned end state of the current chunk; "
-            "'current' keeps the sampled state unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--prefetch-apply-mode",
-        choices=("replace", "boundary"),
-        default="replace",
-        help=(
-            "How to use a completed prefetch. 'replace' immediately discards the remaining current chunk "
-            "and starts the new chunk; 'boundary' waits until the current chunk is exhausted."
-        ),
-    )
-    parser.add_argument(
-        "--disable-prefetch-alignment",
-        action="store_true",
-        help="Do not drop elapsed actions from a completed prefetch before applying it",
-    )
-    parser.add_argument(
-        "--prefetch-alignment-mode",
-        choices=("nearest", "elapsed"),
-        default="nearest",
-        help=(
-            "How to align a returned prefetch. 'elapsed' drops actions by elapsed control steps; "
-            "'nearest' additionally starts from the action closest to the last sent action."
-        ),
-    )
-    parser.add_argument(
-        "--prefetch-alignment-search",
-        type=int,
-        default=12,
-        help="Number of post-latency actions searched when --prefetch-alignment-mode=nearest",
-    )
-    parser.add_argument(
-        "--min-prefetch-actions",
-        type=int,
-        default=12,
-        help="Discard an aligned prefetched chunk if fewer than this many actions remain",
-    )
-    parser.add_argument(
-        "--switch-blend-steps",
-        type=int,
-        default=5,
-        help="Number of actions used to blend across a large chunk-boundary jump",
-    )
-    parser.add_argument(
-        "--max-switch-delta",
-        type=float,
-        default=0.12,
-        help="Blend the next chunk if its first action differs from the last sent action by more than this",
+        default=6,
+        help="Actions over which the chunk-splice offset decays at a chunk boundary; <=1 disables blending",
     )
     parser.add_argument(
         "--max-delta-per-step",
         type=float,
         default=0.0,
         help="Optional final per-control-step action delta limit; <=0 disables this client-side limiter",
+    )
+    parser.add_argument(
+        "--image-jpeg-quality",
+        type=int,
+        default=85,
+        help="JPEG quality for camera observations sent to the server; 0 sends raw ndarrays",
     )
     parser.add_argument(
         "--log",
@@ -321,16 +193,14 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.max_joint_delta < 0 or args.gripper_update_threshold < 0:
         raise ValueError("Action thresholds must be non-negative")
     non_negative_values = {
-        "prefetch_remaining": args.prefetch_remaining,
-        "switch_blend_steps": args.switch_blend_steps,
-        "max_switch_delta": args.max_switch_delta,
+        "chunk_blend_steps": args.chunk_blend_steps,
         "max_delta_per_step": args.max_delta_per_step,
-        "prefetch_alignment_search": args.prefetch_alignment_search,
-        "min_prefetch_actions": args.min_prefetch_actions,
     }
     invalid = [name for name, value in non_negative_values.items() if value < 0]
     if invalid:
         raise ValueError(f"Expected non-negative values for: {', '.join(invalid)}")
+    if not 0 <= args.image_jpeg_quality <= 100:
+        raise ValueError("--image-jpeg-quality must be in [0, 100]")
 
 
 def main() -> None:
@@ -341,6 +211,7 @@ def main() -> None:
         host=args.host,
         port=args.port,
         inference_callback=recorder.record_inference if recorder is not None else None,
+        image_jpeg_quality=args.image_jpeg_quality,
     )
     metadata = policy.get_server_metadata()
     logging.info("Server metadata: %s", metadata)
@@ -350,6 +221,7 @@ def main() -> None:
         raise RuntimeError(f"Unexpected robot config: {metadata.get('robot')}")
     if metadata.get("mock_policy"):
         logging.warning("Connected to a mock hold-current policy; no learned actions will be executed")
+    robot_name = metadata.get("robot") or "xtrainer"
 
     environment = XTrainerRealEnvironment(
         left_robot_ip=args.left_robot_ip,
@@ -374,165 +246,64 @@ def main() -> None:
     )
 
     action_chunk = np.empty((0, 14), dtype=np.float64)
-    action_chunk_source = "synchronous"
     action_index = 0
-    next_chunk: np.ndarray | None = None
-    next_chunk_source: str | None = None
-    prefetch_future: Future | None = None
+    blend_offset: np.ndarray | None = None
+    blend_index = 0
     last_sent_action: np.ndarray | None = None
     period = 1.0 / args.control_hz
     deadline = time.monotonic()
     try:
         environment.reset()
-        with ThreadPoolExecutor(max_workers=1) as prefetch_executor:
-            for step in range(args.max_steps):
-                if prefetch_future is not None and prefetch_future.done():
-                    prefetch_result = prefetch_future.result()
-                    prefetch_future = None
-                    prefetched_chunk = prefetch_result.actions
-                    skipped_actions = 0
-                    if not args.disable_prefetch_alignment:
-                        prefetched_chunk, skipped_actions = _align_prefetched_chunk(
-                            prefetched_chunk,
-                            prefetch_result.request_step,
-                            step,
-                            last_sent_action,
-                            mode=args.prefetch_alignment_mode,
-                            search_window=args.prefetch_alignment_search,
-                        )
+        # Clear server-side episode state once the arm is at the reset pose, so
+        # a long-lived server cannot carry an action cache into this run.
+        policy.reset(robot_name)
+        logging.info("Server policy reset for robot config %s", robot_name)
+
+        for step in range(args.max_steps):
+            if action_index >= len(action_chunk):
+                observation = environment.get_observation()
+                if last_sent_action is not None:
+                    # Command the measured pose as a stationary hold. Holding the
+                    # last *commanded* target instead would keep pushing toward a
+                    # stale target if the arm was pushed or sagged during the
+                    # chunk; holding the measured pose stops it where it is.
+                    hold_action = _hold_action_from_observation(observation)
+                    environment.apply_action(hold_action)
+                    last_sent_action = hold_action.copy()
+                    if recorder is not None:
+                        recorder.record_applied_action(hold_action, step=step, source="hold")
                     logging.info(
-                        "Prefetched %d actions requested at step %d, applying at step %d after skipping %d elapsed actions",
-                        len(prefetched_chunk),
-                        prefetch_result.request_step,
+                        "Action chunk exhausted at step %d; holding measured pose while requesting the next chunk",
                         step,
-                        skipped_actions,
                     )
-                    if len(prefetched_chunk) == 0:
-                        logging.warning(
-                            "Discarded stale prefetched chunk requested at step %d; no aligned actions remain",
-                            prefetch_result.request_step,
-                        )
-                        continue
-                    if len(prefetched_chunk) < args.min_prefetch_actions:
-                        logging.warning(
-                            "Discarded short prefetched chunk requested at step %d; only %d aligned actions remain (< %d)",
-                            prefetch_result.request_step,
-                            len(prefetched_chunk),
-                            args.min_prefetch_actions,
-                        )
-                        continue
-                    action_chunk, action_index, next_chunk, discarded_actions = _apply_prefetched_chunk(
-                        action_chunk,
-                        action_index,
-                        next_chunk,
-                        prefetched_chunk,
-                        last_sent_action,
-                        apply_mode=args.prefetch_apply_mode,
-                        max_switch_delta=args.max_switch_delta,
-                        blend_steps=args.switch_blend_steps,
-                    )
-                    if args.prefetch_apply_mode == "replace":
-                        action_chunk_source = "prefetch-replace"
-                        logging.info(
-                            "Replaced current action chunk at step %d; discarded %d remaining actions",
-                            step,
-                            discarded_actions,
-                        )
-                    else:
-                        next_chunk_source = "prefetch-boundary"
+                response = policy.infer(observation)
+                _log_server_timing(response)
+                action_chunk = _extract_action_chunk(response, args.action_horizon)
+                action_index = 0
+                blend_index = 0
+                blend_offset = _chunk_blend_offset(last_sent_action, action_chunk[0])
+                logging.info("Received %d actions at step %d", len(action_chunk), step)
 
-                if action_index >= len(action_chunk):
-                    if next_chunk is not None:
-                        action_chunk = _smooth_chunk_boundary(
-                            next_chunk,
-                            last_sent_action,
-                            max_switch_delta=args.max_switch_delta,
-                            blend_steps=args.switch_blend_steps,
-                        )
-                        next_chunk = None
-                        action_chunk_source = next_chunk_source or "prefetch-boundary"
-                        next_chunk_source = None
-                    elif prefetch_future is not None:
-                        if last_sent_action is None:
-                            logging.warning("Action chunk exhausted while prefetch is running and no last action is available")
-                            continue
-                        logging.warning("Action chunk exhausted before prefetch finished; holding last action")
-                        action = last_sent_action.copy()
-                        environment.apply_action(action)
-                        if recorder is not None:
-                            recorder.record_applied_action(action, step=step, source="hold-for-prefetch")
-                        deadline += period
-                        remaining = deadline - time.monotonic()
-                        if remaining > 0:
-                            time.sleep(remaining)
-                        else:
-                            deadline = time.monotonic()
-                        continue
-                    else:
-                        action_chunk = _infer_action_chunk(policy, environment.get_observation(), args.action_horizon)
-                        action_chunk_source = "synchronous"
-                    action_index = 0
-                    logging.info("Received %d actions at step %d", len(action_chunk), step)
+            target = _blend_chunk_action(
+                action_chunk[action_index],
+                blend_offset,
+                blend_index,
+                args.chunk_blend_steps,
+            )
+            blend_index += 1
+            action = _rate_limit_action(target, last_sent_action, args.max_delta_per_step)
+            action_index += 1
 
-                if action_index < len(action_chunk):
-                    remaining_actions = len(action_chunk) - action_index
-                    if (
-                        args.prefetch_remaining > 0
-                        and remaining_actions <= args.prefetch_remaining
-                        and prefetch_future is None
-                        and next_chunk is None
-                    ):
-                        observation = environment.get_observation()
-                        if args.prefetch_state_mode == "chunk-end":
-                            sampled_state = np.asarray(observation.get("observation.state"), dtype=np.float64)
-                            projected_state = _project_chunk_end_state(
-                                action_chunk,
-                                action_index,
-                                last_sent_action,
-                                args.max_delta_per_step,
-                            )
-                            observation = _with_projected_state(observation, projected_state)
-                            if projected_state is not None:
-                                state_delta = float(np.max(np.abs(projected_state - sampled_state)))
-                                logging.debug(
-                                    "Using projected chunk-end state for prefetch at step %d; max state delta %.4f",
-                                    step,
-                                    state_delta,
-                                )
-                        prefetch_future = prefetch_executor.submit(
-                            _infer_prefetch_chunk,
-                            policy,
-                            observation,
-                            args.action_horizon,
-                            step,
-                        )
-                        logging.info(
-                            "Started action prefetch at step %d with %d actions remaining",
-                            step,
-                            remaining_actions,
-                        )
-
-                    action = _rate_limit_action(action_chunk[action_index], last_sent_action, args.max_delta_per_step)
-                    action_source = action_chunk_source
-                    action_index += 1
-                elif last_sent_action is not None and prefetch_future is not None:
-                    logging.warning("Action chunk exhausted before prefetch finished; holding last action")
-                    action = last_sent_action.copy()
-                    action_source = "hold-for-prefetch"
-                else:
-                    action = _infer_action_chunk(policy, environment.get_observation(), args.action_horizon)[0]
-                    action_source = "synchronous-fallback"
-
-                environment.apply_action(action)
-                if recorder is not None:
-                    recorder.record_applied_action(action, step=step, source=action_source)
-                last_sent_action = action.copy()
-                deadline += period
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    time.sleep(remaining)
-                else:
-                    deadline = time.monotonic()
+            environment.apply_action(action)
+            if recorder is not None:
+                recorder.record_applied_action(action, step=step, source="chunk")
+            last_sent_action = action.copy()
+            deadline += period
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            else:
+                deadline = time.monotonic()
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:

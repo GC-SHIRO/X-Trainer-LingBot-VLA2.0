@@ -10,6 +10,10 @@ from .image_transforms import prepare_xtrainer_camera_image
 
 logger = logging.getLogger(__name__)
 
+# Time allowed for the arm to physically settle on the reset pose before the
+# resulting joint positions are sampled and treated as the starting state.
+RESET_SETTLE_SECONDS = 0.2
+
 
 def _obs_dict_to_arm_array(obs: dict[str, float]) -> np.ndarray:
     arm = np.zeros(7, dtype=np.float64)
@@ -50,7 +54,7 @@ class XTrainerRealEnvironment:
             gripper_port=left_gripper_port,
             gripper_id=left_gripper_id,
             gripper_servo_pos=left_gripper_servo_pos,
-            read_gripper_position=False,
+            read_gripper_position=True,
             max_delta_per_step=servo_step_limit,
             camera_serials={
                 "cam_top": camera_top_serial,
@@ -63,7 +67,7 @@ class XTrainerRealEnvironment:
             gripper_port=right_gripper_port,
             gripper_id=right_gripper_id,
             gripper_servo_pos=right_gripper_servo_pos,
-            read_gripper_position=False,
+            read_gripper_position=True,
             max_delta_per_step=servo_step_limit,
             camera_serials={"cam_right_wrist": camera_right_wrist_serial},
             camera_fps=camera_fps,
@@ -90,10 +94,28 @@ class XTrainerRealEnvironment:
     def reset(self) -> None:
         self._ensure_connected()
         if self._reset_pose is not None:
-            self._move_smooth(self._get_bimanual_qpos(), self._reset_pose)
-            time.sleep(0.2)
-        self._last_action = self._get_bimanual_qpos()
+            self._last_action = self.smooth_reset(self._reset_pose)
+        else:
+            self._last_action = self._get_bimanual_qpos()
         self._last_gripper_sent = self._last_action[[6, 13]].copy()
+
+    def smooth_reset(self, goal_action: np.ndarray) -> np.ndarray:
+        """Drive the arm to ``goal_action`` and return the settled joint positions.
+
+        A fixed-length linspace over the whole 14-wide vector, so the grippers
+        are interpolated along with the joints and the last commanded target is
+        exactly the goal (a ramped loop can stop short of it). Each step is a
+        ServoJ target, so the arm servos toward the pose rather than stepping
+        through every intermediate point.
+        """
+        goal = np.asarray(goal_action, dtype=np.float64).reshape(-1)
+        if goal.shape[0] != 14:
+            raise ValueError(f"Expected reset pose length 14, got {goal.shape[0]}")
+        if not np.all(np.isfinite(goal)):
+            raise ValueError("Reset pose contains non-finite values")
+        self._move_smooth(self._get_bimanual_qpos(), goal)
+        time.sleep(RESET_SETTLE_SECONDS)
+        return self._get_bimanual_qpos()
 
     def get_observation(self) -> dict:
         self._ensure_connected()

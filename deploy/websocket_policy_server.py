@@ -6,6 +6,7 @@ import time
 import traceback
 from typing import Callable
 
+from .image_codec import decode_policy_images
 from .msgpack_numpy import Packer, unpackb
 import websockets.asyncio.server as _server
 import websockets.frames
@@ -60,7 +61,7 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = unpackb(await websocket.recv())
+                obs = decode_policy_images(unpackb(await websocket.recv()))
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)

@@ -368,6 +368,32 @@ class LingbotVLAv2Server:
         # Load data processors
         self.vla.feature_transform = feature_transform
         self.action_key = feature_transform.org_features["actions"]
+
+    def warmup(self, robo_name, height: int = 480, width: int = 640, state_dim: int = 14) -> None:
+        """Run one throwaway inference so the first real request is not the slow one.
+
+        The first forward pass pays for CUDA kernel autotuning and lazy module
+        init, which shows up as a multi-second stall on the very first action
+        chunk. Requires ``reset`` to have run first, since it needs the feature
+        transform to know the image feature keys.
+        """
+        feature_transform = getattr(self.vla, "feature_transform", None)
+        if feature_transform is None:
+            raise RuntimeError("warmup requires reset() to have loaded the feature transform")
+
+        observation: dict = {
+            "task": "warmup",
+            "observation.state": np.zeros(state_dim, dtype=np.float32),
+        }
+        for image_key in feature_transform.org_features["images"]:
+            observation[image_key] = np.zeros((height, width, 3), dtype=np.uint8)
+
+        started = time.monotonic()
+        self.infer(observation)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        self.reset(robo_name)
+        print(f"✅ Policy warmup inference completed in {elapsed_ms:.1f} ms")
+
     def resize_image(self, observation):
         image_features  = self.vla.feature_transform.org_features['images']
         image_size = getattr(self.data_config, 'img_size', 256)

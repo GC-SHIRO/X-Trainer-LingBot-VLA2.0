@@ -684,7 +684,8 @@ python scripts/run_xtrainer_real.py \
   --action-horizon 50 \
   --control-hz 30 \
   --max-steps 1000 \
-  --prefetch-remaining 0 \
+  --chunk-blend-steps 6 \
+  --image-jpeg-quality 85 \
   --log
 ```
 
@@ -702,39 +703,39 @@ python scripts/run_xtrainer_real.py \
 | `--ramp-max-steps`           |  `100` | 平滑过渡最大步数。                                             |
 | `--gripper-update-threshold` |    `0` | 默认发送每次夹爪目标变化。                                     |
 | `--servo-step-limit`         |  `inf` | 默认不限制 follower 的关节目标跳变。                           |
-| `--max-switch-delta`         | `0.12` | chunk 边界触发混合的阈值。                                     |
-| `--switch-blend-steps`       |    `5` | chunk 边界混合步数。                                           |
+| `--chunk-blend-steps`        |    `6` | chunk 边界拼接偏移的衰减步数；`<=1` 关闭混合。                 |
 | `--max-delta-per-step`       |    `0` | 最终逐步限幅；`0` 表示关闭。                                   |
+| `--image-jpeg-quality`       |   `85` | 相机观测的 JPEG 传输质量；`0` 发送原始 ndarray。               |
 
 客户端会拒绝错误形状、NaN 和 Inf，但无法判断数值有效的动作是否会在真实场景中碰撞。急停看护不能被软件检查替代。
 
-### 13.6 异步预取
+### 13.6 Action chunk 执行与拼接
 
-默认 `--prefetch-remaining 0`，即完整执行当前 50 步 action chunk 后再同步请求下一段。需要降低推理等待时，可显式开启预取；建议按实测推理延迟调整：
+客户端不做异步预取。它完整执行当前 action chunk，执行完后读一次观测，把其中的**实测位姿**作为 hold 下发，再同步请求下一段（同一份观测也用于这次推理请求，不额外多读相机）。
+
+下发实测位姿而不是重发上一个动作，是因为机械臂在段内被外力推动或下坠时，继续下发最后目标会一直"顶"着那个旧目标；下发实测位姿则停在它当前所在的位置，让新 chunk 从那里起规划。hold 同时成为下一段拼接偏移的起算点。
+
+每段新 chunk 的第一批动作会做**拼接偏移衰减**：切换时计算一次
 
 ```text
-prefetch_remaining >= ceil(平均推理秒数 * control_hz) + 安全余量
+blend_offset = 上一个已下发动作 - 新 chunk 的第一个动作
 ```
 
-示例：
+随后在前 `--chunk-blend-steps` 步内用 smoothstep 把该偏移衰减到 0：
 
-```bash
-python scripts/run_xtrainer_real.py \
-  --host <POLICY_SERVER_IP> \
-  --task "<TRAINING_TASK_PROMPT>" \
-  --camera-top-serial <TOP_SERIAL> \
-  --camera-left-wrist-serial <LEFT_WRIST_SERIAL> \
-  --camera-right-wrist-serial <RIGHT_WRIST_SERIAL> \
-  --action-horizon 50 \
-  --control-hz 30 \
-  --prefetch-remaining 28 \
-  --max-switch-delta 0.12 \
-  --switch-blend-steps 5 \
-  --max-delta-per-step 0.05 \
-  --max-steps 100
+```text
+progress = (index + 1) / blend_steps
+weight   = progress^2 * (3 - 2 * progress)
+target[关节] += (1 - weight) * blend_offset[关节]
 ```
 
-设置 `--prefetch-remaining 0` 可关闭预取。完整调参说明见 [`docs/xtrainer_real_async_prefetch.md`](docs/xtrainer_real_async_prefetch.md)。
+只有常量偏移被衰减，新轨迹自身的运动不受影响；首步保留约 92.6% 的偏移，第 `blend_steps` 步精确回到模型目标。**夹爪列（索引 6 和 13）永远不参与混合**，避免开合指令被过渡抹平。`--chunk-blend-steps 0` 或 `1` 关闭混合。
+
+### 13.7 相机观测传输
+
+客户端默认用 JPEG 编码三路相机观测再发送（`--image-jpeg-quality 85`），把每次请求约 2.76 MB 的原始 ndarray 载荷压到十分之一量级——实测 640×480 合成画面约 29x，即使纯噪声这种最坏情况仍有约 3.5x。服务端在送入模型前解码回原始分辨率和 RGB 顺序，因此模型输入不变。
+
+编码通过握手元数据协商：只有服务端在 `image_encodings` 中声明 `jpeg_rgb` 时客户端才压缩，对旧服务端自动回退为原始 ndarray。`--image-jpeg-quality 0` 可显式关闭。
 
 ---
 
@@ -770,7 +771,7 @@ python scripts/run_xtrainer_real.py \
 
 ### 14.8 Action chunk 不连续
 
-调整 `prefetch-remaining`、`max-switch-delta`、`switch-blend-steps` 和 `max-delta-per-step`。先记录推理延迟，再按延迟计算预取点。
+先看服务端延迟：每次推理的 `server_timing.infer_ms` 会打到客户端日志。`infer_ms` 偏大时，chunk 之间的停顿会明显变长，可在服务端降低 `--num-steps`（10 → 4~6）压缩推理时间。仍抖动时再调整 `--chunk-blend-steps`（增大到 8~10 让拼接更缓）和 `--max-delta-per-step`。`--chunk-blend-steps 0` 可对比确认抖动是否来自混合本身。
 
 ---
 
@@ -792,7 +793,7 @@ python scripts/run_xtrainer_real.py \
 | `scripts/run_xtrainer_real.py`         | 真机推理客户端。                               |
 | `tests/run_xtrainer_basic_control.py`  | 逐关节和夹爪基础测试。                         |
 | `deploy/xtrainer_real/README.md`       | 真机客户端专项说明。                           |
-| `docs/xtrainer_real_async_prefetch.md` | 异步 action chunk 预取调参。                   |
+| `deploy/image_codec.py`                | 相机观测的 JPEG 传输编解码。                   |
 | `lingbotvla/utils/lora_utils.py`       | 通用 LoRA 工具；不等于 X-Trainer LoRA 已交付。 |
 
 ---

@@ -246,8 +246,27 @@ class DobotXTrainer:
         for index, name in enumerate(JOINT_NAMES):
             observation[f"{name}.pos"] = float(angles_rad[index])
         if self._gripper is not None:
-            observation["gripper.pos"] = float(self._last_gripper_pos)
+            observation["gripper.pos"] = float(self._read_gripper_or_last_command())
         return observation
+
+    def _read_gripper_or_last_command(self) -> float:
+        """Report the measured gripper position, falling back to the last command.
+
+        Reporting the last *commanded* value hides whether the gripper actually
+        closed (blocked, unpowered, servo fault), so the policy would keep being
+        told the jaw is where it was asked to be. A failed read falls back to the
+        commanded value rather than raising, since a serial hiccup should not
+        abort the control loop.
+        """
+        if self.read_gripper_position:
+            try:
+                measured = self._gripper.get_position()
+            except Exception:
+                logger.warning("Gripper position read failed; reporting the last commanded value", exc_info=True)
+            else:
+                if measured is not None:
+                    return measured
+        return self._last_gripper_pos
 
     def send_action(self, action: dict[str, float]) -> dict[str, float]:
         if not self._connected:

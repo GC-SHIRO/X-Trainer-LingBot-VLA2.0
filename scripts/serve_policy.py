@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from deploy.image_codec import JPEG_RGB_ENCODING
 from deploy.lingbot_vla_v2_policy import LingbotVLAv2Server
 from deploy.inference_logging import InferenceRecorder
 from deploy.websocket_policy_server import WebsocketPolicyServer
@@ -33,7 +34,13 @@ XTRAINER_RESET_POSE = (
 
 
 def _build_server_metadata(robot: str) -> dict:
-    metadata = {"model_type": "lingbot-vla-2.0", "robot": robot}
+    metadata = {
+        "model_type": "lingbot-vla-2.0",
+        "robot": robot,
+        # The client only JPEG-encodes camera frames when the server advertises
+        # support; older servers keep receiving raw ndarrays.
+        "image_encodings": ["raw_ndarray", JPEG_RGB_ENCODING],
+    }
     if robot == "xtrainer":
         metadata["reset_pose"] = list(XTRAINER_RESET_POSE)
     return metadata
@@ -70,6 +77,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp32", action="store_true", help="Use float32 instead of bfloat16")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile for inference")
     parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Skip the throwaway warmup inference that keeps the first action chunk off the cold-start path",
+    )
+    parser.add_argument(
         "--log",
         action="store_true",
         help="Write raw policy requests, responses, and input PNGs under ./log",
@@ -98,6 +110,8 @@ def main() -> None:
         num_steps=args.num_steps,
     )
     policy.reset(args.robot)
+    if not args.no_warmup:
+        policy.warmup(args.robot)
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

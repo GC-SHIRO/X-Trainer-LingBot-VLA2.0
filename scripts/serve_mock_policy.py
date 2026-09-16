@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from deploy.image_codec import JPEG_RGB_ENCODING
 from deploy.websocket_policy_server import WebsocketPolicyServer
 
 
@@ -59,6 +60,9 @@ def main() -> None:
         "robot": "xtrainer",
         "mock_policy": True,
         "action_mode": "hold-current",
+        # Advertised so the model-free hardware test exercises the same JPEG
+        # transport the real server uses.
+        "image_encodings": ["raw_ndarray", JPEG_RGB_ENCODING],
     }
     logging.warning("Starting model-free policy: actions will hold the client-reported position")
     WebsocketPolicyServer(
