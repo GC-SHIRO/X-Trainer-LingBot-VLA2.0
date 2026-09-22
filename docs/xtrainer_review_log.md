@@ -109,12 +109,12 @@ LingBot 原本保留了 prefetch，且 `_apply_prefetched_chunk` 的 `replace` �
 
 删除预取后，每段 chunk 执行完到下一段返回之间是一段纯等待。此前客户端在这期间不发任何指令，机械臂靠 ServoJ 的 `servo_j_time = 0.03` 前瞻自然停在**最后下发目标**上。
 
-现按 XVLA（`aa7b327`）改为：chunk 耗尽时读一次观测，把其中的 `observation.state`（实测位姿）作为 hold 下发，然后才发起下一次推理；**同一份观测**同时用于 hold 和推理请求，不额外多读一次相机。
+chunk 耗尽时读一次观测，把其中的 `observation.state` 的机械臂关节位置作为 hold 下发，夹爪（索引 6、13）保留上一条下发目标，然后才发起下一次推理；**同一份观测**同时用于 hold 和推理请求，不额外多读一次相机。夹爪被物体挡住时，不能用实测开度覆盖抓紧目标，否则可能降低夹持力。
 
 ```python
 observation = environment.get_observation()
 if last_sent_action is not None:
-    hold_action = _hold_action_from_observation(observation)   # 校验 14 维、有限
+    hold_action = _hold_action_from_observation(observation, last_sent_action)   # 实测关节 + 上一条夹爪目标
     environment.apply_action(hold_action)
     last_sent_action = hold_action.copy()
 response = policy.infer(observation)

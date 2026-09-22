@@ -181,33 +181,48 @@ class HoldActionTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.client = _load_client_module()
 
-    def test_returns_the_measured_pose_as_float64(self) -> None:
+    def test_holds_measured_joints_and_preserves_gripper_targets(self) -> None:
         state = np.arange(14, dtype=np.float32)
+        state[[6, 13]] = [0.4, 0.6]
+        previous = np.full(14, -1.0)
+        previous[[6, 13]] = [0.0, 1.0]
 
-        hold = self.client._hold_action_from_observation({"observation.state": state})
+        hold = self.client._hold_action_from_observation({"observation.state": state}, previous)
 
         self.assertEqual(hold.dtype, np.float64)
-        np.testing.assert_allclose(hold, np.arange(14))
+        joints = np.r_[0:6, 7:13]
+        np.testing.assert_allclose(hold[joints], state[joints])
+        np.testing.assert_allclose(hold[[6, 13]], [0.0, 1.0])
+        np.testing.assert_allclose(state[[6, 13]], [0.4, 0.6])
 
     def test_returns_a_copy_so_the_observation_is_not_aliased(self) -> None:
         # float64 so that the dtype conversion cannot be what makes the copy.
         state = np.zeros(14, dtype=np.float64)
         observation = {"observation.state": state}
+        previous = np.ones(14, dtype=np.float64)
 
-        hold = self.client._hold_action_from_observation(observation)
+        hold = self.client._hold_action_from_observation(observation, previous)
         hold[0] = 5.0
+        hold[6] = 0.5
 
-        self.assertEqual(observation["observation.state"][0], 0.0)
+        np.testing.assert_array_equal(state, np.zeros(14))
+        np.testing.assert_array_equal(previous, np.ones(14))
 
     def test_rejects_wrong_length_and_non_finite_state(self) -> None:
         for state in (np.zeros(13), np.zeros(15), np.full(14, np.nan), np.full(14, np.inf)):
             with self.subTest(state=state):
                 with self.assertRaises(ValueError):
-                    self.client._hold_action_from_observation({"observation.state": state})
+                    self.client._hold_action_from_observation({"observation.state": state}, np.zeros(14))
+
+    def test_rejects_invalid_previous_action(self) -> None:
+        for previous in (np.zeros(13), np.zeros(15), np.full(14, np.nan), np.full(14, np.inf)):
+            with self.subTest(previous=previous):
+                with self.assertRaises(ValueError):
+                    self.client._hold_action_from_observation({"observation.state": np.zeros(14)}, previous)
 
     def test_rejects_missing_state(self) -> None:
         with self.assertRaises(KeyError):
-            self.client._hold_action_from_observation({"task": "test"})
+            self.client._hold_action_from_observation({"task": "test"}, np.zeros(14))
 
 
 class ServerTimingTest(unittest.TestCase):

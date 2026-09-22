@@ -85,8 +85,8 @@ def _blend_chunk_action(
     return target
 
 
-def _hold_action_from_observation(observation: dict) -> np.ndarray:
-    """Measured pose to command as a stationary hold while the next chunk is inferred."""
+def _hold_action_from_observation(observation: dict, last_sent_action: np.ndarray) -> np.ndarray:
+    """Hold measured arm joints while retaining the previous gripper targets."""
     if "observation.state" not in observation:
         raise KeyError("Missing 'observation.state' in client observation")
     state = np.asarray(observation["observation.state"], dtype=np.float64).reshape(-1).copy()
@@ -94,6 +94,10 @@ def _hold_action_from_observation(observation: dict) -> np.ndarray:
         raise ValueError(f"Expected observation.state length 14, got {state.shape[0]}")
     if not np.all(np.isfinite(state)):
         raise ValueError("observation.state contains non-finite values")
+    previous = np.asarray(last_sent_action, dtype=np.float64).reshape(-1)
+    if previous.shape[0] != 14 or not np.all(np.isfinite(previous)):
+        raise ValueError("last_sent_action must contain 14 finite values")
+    state[[6, 13]] = previous[[6, 13]]
     return state
 
 
@@ -267,7 +271,9 @@ def main() -> None:
                     # last *commanded* target instead would keep pushing toward a
                     # stale target if the arm was pushed or sagged during the
                     # chunk; holding the measured pose stops it where it is.
-                    hold_action = _hold_action_from_observation(observation)
+                    # Keep gripper targets so contact with an object does not
+                    # turn a closing command into a hold at the blocked opening.
+                    hold_action = _hold_action_from_observation(observation, last_sent_action)
                     environment.apply_action(hold_action)
                     last_sent_action = hold_action.copy()
                     if recorder is not None:
