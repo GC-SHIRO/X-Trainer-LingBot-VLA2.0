@@ -827,25 +827,25 @@ target[关节] += (1 - weight) * blend_offset[关节]
 ## 15. 关键文件索引
 
 
-| 文件                                       | 作用                                                           |
-| -------------------------------------------- | ---------------------------------------------------------------- |
-| `tools/create_environment`                 | 创建固定版本的训练环境。                                       |
+| 文件                                                                         | 作用                                                                          |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `tools/create_environment`                                                   | 创建固定版本的训练环境。                                                      |
 | [`tools/convert_dataset_v21_to_v30.py`](tools/convert_dataset_v21_to_v30.py) | 官方 v2.1 → v3.0 转换脚本；[使用说明](tools/convert_dataset_v21_to_v30.md)。 |
-| `tools/download_base_models.sh`            | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2（支持 HF / ModelScope）。 |
-| `tools/download_base_models_modelscope.sh` | 上述脚本的 ModelScope 便捷入口。                               |
-| `configs/robot_configs/xtrainer.yaml`      | X-Trainer 字段、delta action 和相机映射。                      |
-| `configs/vla/xtrainer/xtrainer.yaml`       | X-Trainer 全参训练配置。                                       |
-| `docs/FROZEN_VLM_TRAINING.md`              | 单卡冻结 VLM 的训练教程与验证方法。                            |
-| `scripts/compute_norm_stats.py`            | 计算 normalization statistics。                                |
-| `tasks/vla/train_lingbotvla.py`            | 训练入口。                                                     |
-| `scripts/open_loop_eval.py`                | 离线开环评估。                                                 |
-| `scripts/serve_policy.py`                  | WebSocket policy server。                                      |
-| `scripts/serve_mock_policy.py`             | 不加载模型的保持姿态策略。                                     |
-| `scripts/run_xtrainer_real.py`             | 真机推理客户端。                                               |
-| `tests/run_xtrainer_basic_control.py`      | 逐关节和夹爪基础测试。                                         |
-| `deploy/xtrainer_real/README.md`           | 真机客户端专项说明。                                           |
-| `deploy/image_codec.py`                    | 相机观测的 JPEG 传输编解码。                                   |
-| `lingbotvla/utils/lora_utils.py`           | 通用 LoRA 工具；不等于 X-Trainer LoRA 已交付。                 |
+| `tools/download_base_models.sh`                                              | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2（支持 HF / ModelScope）。                |
+| `tools/download_base_models_modelscope.sh`                                   | 上述脚本的 ModelScope 便捷入口。                                              |
+| `configs/robot_configs/xtrainer.yaml`                                        | X-Trainer 字段、delta action 和相机映射。                                     |
+| `configs/vla/xtrainer/xtrainer.yaml`                                         | X-Trainer 全参训练配置。                                                      |
+| `docs/FROZEN_VLM_TRAINING.md`                                                | 单卡冻结 VLM 的训练教程与验证方法。                                           |
+| `scripts/compute_norm_stats.py`                                              | 计算 normalization statistics。                                               |
+| `tasks/vla/train_lingbotvla.py`                                              | 训练入口。                                                                    |
+| `scripts/open_loop_eval.py`                                                  | 离线开环评估。                                                                |
+| `scripts/serve_policy.py`                                                    | WebSocket policy server。                                                     |
+| `scripts/serve_mock_policy.py`                                               | 不加载模型的保持姿态策略。                                                    |
+| `scripts/run_xtrainer_real.py`                                               | 真机推理客户端。                                                              |
+| `tests/run_xtrainer_basic_control.py`                                        | 逐关节和夹爪基础测试。                                                        |
+| `deploy/xtrainer_real/README.md`                                             | 真机客户端专项说明。                                                          |
+| `deploy/image_codec.py`                                                      | 相机观测的 JPEG 传输编解码。                                                  |
+| `lingbotvla/utils/lora_utils.py`                                             | 通用 LoRA 工具；不等于 X-Trainer LoRA 已交付。                                |
 
 ---
 
