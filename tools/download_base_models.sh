@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Download the LingBot-VLA 2.0 base models from Hugging Face or ModelScope.
@@ -15,9 +15,45 @@ set -euo pipefail
 #   MOGE_REPOSITORY=<owner/repository>        MoGe-2 repository on Hugging Face
 #   MOGE_MODELSCOPE_REPOSITORY=<owner/repo>   MoGe-2 mirror on ModelScope (optional)
 
+log() {
+  printf '[lingbot-download] %s\n' "$*"
+}
+
+warn() {
+  printf '[lingbot-download] WARN: %s\n' "$*" >&2
+}
+
+check_host() {
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    warn "this script is tested on Linux; detected $(uname -s); continuing"
+    return
+  fi
+
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    if [[ "${ID:-}" == "ubuntu" ]]; then
+      case "${VERSION_ID:-}" in
+        22.04|24.04)
+          log "supported host detected: ${PRETTY_NAME:-Ubuntu ${VERSION_ID}}"
+          ;;
+        *)
+          warn "tested Ubuntu releases are 22.04 and 24.04; detected ${PRETTY_NAME:-unknown}; continuing"
+          ;;
+      esac
+    else
+      warn "tested hosts are Ubuntu 22.04/24.04; detected ${PRETTY_NAME:-unknown}; continuing"
+    fi
+  else
+    warn "/etc/os-release is unavailable; host version check skipped"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash tools/download_base_models.sh [--source hf|modelscope]
+
+Tested hosts: Ubuntu 22.04 and 24.04 LTS x86_64.
 
   -s, --source <hf|modelscope>  Model hub to download from (default: hf, or $MODEL_SOURCE)
       --hf                      Shorthand for --source hf
@@ -76,6 +112,7 @@ case "$SOURCE" in
     ;;
 esac
 
+check_host
 echo "=== Download LingBot-VLA 2.0 base models (source: $SOURCE) ==="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

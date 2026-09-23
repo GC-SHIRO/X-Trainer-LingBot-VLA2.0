@@ -327,7 +327,7 @@ train:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `data_name` | str | — | Robot config name for a single dataset, or `"multi"` when `train_path` points to a dataset list. Must be consistent with normalization statistics. |
-| `train_path` | str | — | Path to a LeRobot v2.1/v3.0 dataset directory, or a text list when `data_name: multi`. |
+| `train_path` | str | — | Absolute path to a LeRobot v3.0 dataset directory in the pinned lerobot==0.4.2 environment; convert v2.1 data first. Use a text list when `data_name: multi`. |
 | `robot_config_root` | str | — | Directory containing robot config YAML files, for example `configs/robot_configs`. |
 | `joints` | List[Dict] | — | Max dim of each named joints in data. |
 | `cameras` | List[str] | — | Camera names in data. |

@@ -11,7 +11,7 @@
 本文档指导用户在 Dobot X-Trainer 双臂平台上完成 LingBot-VLA 2.0 的完整部署链路：
 
 1. 检查 X-Trainer 硬件，完成遥操作和示教数据采集。
-2. 将原始数据转换为 LingBot-VLA 训练所需的 LeRobot v2.1 数据集。
+2. 将原始数据转换为 LeRobot v2.1，再用仓库内的官方脚本升级为当前训练环境所需的 v3.0。
 3. 安装 LingBot-VLA 2.0 环境，准备基础模型并计算 normalization statistics。
 4. 执行 X-Trainer 全参数微调，检查训练产物并进行离线开环评估。
 5. 启动 WebSocket policy server，通过 mock client 和真机 client 验证闭环推理。
@@ -28,6 +28,7 @@
 X-Trainer 硬件配置
   -> 遥操作与原始 demonstration 采集
   -> LeRobot v2.1 数据集
+  -> 官方脚本转换为 LeRobot v3.0 数据集
   -> X-Trainer 字段映射与 delta action 转换
   -> normalization statistics
   -> LingBot-VLA 2.0 全参数微调
@@ -96,20 +97,20 @@ X-Trainer 硬件配置
 环境脚本以以下组合为基准：
 
 
-| 组件              | 版本或要求                    |
-| ------------------- | ------------------------------- |
-| OS                | Ubuntu 24.04 LTS x86_64       |
-| Python            | 3.12                          |
-| NVIDIA Driver     | `>= 570.26`                   |
-| PyTorch           | 2.8.0 + CUDA 12.8 wheels      |
-| Transformers      | 4.57.3                        |
-| Hugging Face Hub  | 0.34.3                        |
-| FlashAttention    | 2.8.3                         |
-| LeRobot Python 包 | 0.4.2                         |
-| Weights & Biases  | 0.21.0                        |
-| GPU               | Compute Capability 8.0 或更高 |
+| 组件              | 版本或要求                      |
+| ------------------- | --------------------------------- |
+| OS                | Ubuntu 22.04 / 24.04 LTS x86_64 |
+| Python            | 3.12                            |
+| NVIDIA Driver     | `>= 570.26`                     |
+| PyTorch           | 2.8.0 + CUDA 12.8 wheels        |
+| Transformers      | 4.57.3                          |
+| Hugging Face Hub  | 0.34.3                          |
+| FlashAttention    | 2.8.3                           |
+| LeRobot Python 包 | 0.4.2                           |
+| Weights & Biases  | 0.21.0                          |
+| GPU               | Compute Capability 8.0 或更高   |
 
-LeRobot Python 包版本 `0.4.2` 与 LeRobot 数据集格式 `v2.1` 是两个概念，不要混用版本号。
+LeRobot Python 包版本与数据集格式是两个概念。当前环境固定的 `lerobot==0.4.2` 使用 v3.0 数据格式，不能直接读取 v2.1；已有 v2.1 数据请先按第 6 节转换。
 
 推理建议至少 24GB 显存。全参数训练的实际显存取决于模型、图像配置和并行策略；仓库配置启用 FSDP full shard，建议从多张 80GB GPU 或同等级训练资源开始。任何显存估算都应通过本机 smoke training 复核。
 
@@ -166,11 +167,11 @@ bash tools/download_base_models.sh
 脚本下载：
 
 
-| 资产               | Hugging Face 默认来源          | ModelScope 默认来源              |
-| -------------------- | -------------------------------- | ---------------------------------- |
-| Qwen3-VL           | `Qwen/Qwen3-VL-4B-Instruct`    | `Qwen/Qwen3-VL-4B-Instruct`      |
-| LingBot-VLA 2.0 6B | `robbyant/lingbot-vla-v2-6b`   | `Robbyant/lingbot-vla-v2-6b`     |
-| MoGe-2             | `Ruicheng/moge-2-vitb-normal`  | 无官方发布，回退到 Hugging Face  |
+| 资产               | Hugging Face 默认来源         | ModelScope 默认来源             |
+| -------------------- | ------------------------------- | --------------------------------- |
+| Qwen3-VL           | `Qwen/Qwen3-VL-4B-Instruct`   | `Qwen/Qwen3-VL-4B-Instruct`     |
+| LingBot-VLA 2.0 6B | `robbyant/lingbot-vla-v2-6b`  | `Robbyant/lingbot-vla-v2-6b`    |
+| MoGe-2             | `Ruicheng/moge-2-vitb-normal` | 无官方发布，回退到 Hugging Face |
 
 可选下载源：
 
@@ -248,7 +249,9 @@ LingBot 仓库不包含 leader 遥操作和 raw episode 采集程序。此阶段
 
 ---
 
-## 6. 转换为 LeRobot v2.1
+## 6. 数据转换：raw → LeRobot v2.1 → v3.0
+
+### 6.1 raw 转 v2.1 与相机方向校正
 
 LingBot 训练入口读取 LeRobot 数据集，不能直接读取 X-Trainer raw episode。建议复用 Pi0.5 已验证的转换脚本，并保证以下映射：
 
@@ -262,12 +265,41 @@ LingBot 训练入口读取 LeRobot 数据集，不能直接读取 X-Trainer raw 
 | `rightImg`        | `observation.images.right_wrist` | RGB，帧号对齐。             |
 | task 参数         | `task`                           | 每个 episode 保存语言任务。 |
 
-转换后至少检查：
+相机方向校正工具仅支持 v2.1 视频布局，必须在升级 v3.0 前运行。需要校正时，可先创建副本，顶视和左手腕保持不变，右手腕上下加左右翻转：
+
+```bash
+python tools/transform_xtrainer_dataset_images.py \
+  --input-root /data/xtrainer_dataset_original \
+  --output-root /data/xtrainer_lerobot
+```
+
+可先增加 `--dry-run` 验证输入；输出目录已存在时必须显式指定 `--overwrite-output`。随后对输出副本执行第 6.2 节的升级。
+
+### 6.2 使用官方脚本升级为 v3.0
+
+仓库包含与 `lerobot==0.4.2` 对应的[官方转换脚本](tools/convert_dataset_v21_to_v30.py)，原样保留上游实现和许可证。先激活训练环境；假设 v2.1 数据位于 `/data/xtrainer_lerobot`：
+
+```bash
+conda activate lingbotvla
+python tools/convert_dataset_v21_to_v30.py \
+  --root /data \
+  --repo-id xtrainer_lerobot \
+  --push-to-hub false
+```
+
+该版本实际读取 `root/repo-id`，因此 `--root` 填父目录。转换成功后，原路径保存 v3.0 数据，原始数据保留在 `/data/xtrainer_lerobot_old`。`--push-to-hub false` 关闭默认的 Hub 上传。脚本会清理已有的 `_v30` 临时目录，并可能在重试时用 `_old` 恢复原目录；重试前检查这些目录。完整说明及上游来源见[转换工具说明](tools/convert_dataset_v21_to_v30.md)。
+
+后续归一化统计、训练和评估统一使用转换后的数据集**绝对路径**。
+
+### 6.3 验证 v3.0 数据
+
+升级后至少检查：
 
 ```python
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 dataset = LeRobotDataset("<repo_id>", root="/path/to/lerobot_dataset")
+assert dataset.meta.info["codebase_version"] == "v3.0"
 sample = dataset[0]
 assert tuple(sample["observation.state"].shape) == (14,)
 assert tuple(sample["action"].shape[-1:]) == (14,)
@@ -281,16 +313,6 @@ print("dataset contract ok", len(dataset))
 ```
 
 如果本地 LeRobot API 的构造参数不同，以环境中固定的 `lerobot==0.4.2` 为准。某一路图像缺失或损坏时，应丢弃整帧或整条 episode，不能让三路图像与 state/action 错位。
-
-对于已生成的 X-Trainer 视频数据集，可在不改动源数据的前提下创建相机方向校正副本。顶视和左手腕保持不变，右手腕上下加左右翻转：
-
-```bash
-python tools/transform_xtrainer_dataset_images.py \
-  --input-root /data/xtrainer_dataset_original \
-  --output-root /data/xtrainer_dataset_camera_aligned
-```
-
-可先增加 `--dry-run` 验证输入；输出目录已存在时必须显式指定 `--overwrite-output`。
 
 ---
 
@@ -367,7 +389,33 @@ ls -lh assets/norm_stats/xtrainer.json
 
 ---
 
-## 9. 全参数微调
+## 9. 训练：全参数微调与冻结 VLM
+
+如果使用单张 GPU 冻结整个 VLM、只训练 action expert 及动作侧模块，请改用独立教程：[`docs/FROZEN_VLM_TRAINING.md`](docs/FROZEN_VLM_TRAINING.md)。不要只设置 `freeze_vision_encoder`，该参数只冻结视觉编码器，并不会冻结完整 VLM。
+
+### 冻结 VLM 快速入口（单卡）
+
+`--train.train_expert_only true` 会让整个视觉语言模型 `qwenvl` 保持评估模式并停止更新其参数，优化器跳过这些参数；动作专家和其余可训练的动作侧模块继续更新。这能减少梯度与优化器状态的显存占用，但模型权重仍需加载，实际显存需求以试跑为准。该模式使用完整 checkpoint 保存和推理流程。
+
+先完成第 6–8 节的数据升级、路径配置和归一化统计，再运行 10 step 单卡试跑：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash train.sh tasks/vla/train_lingbotvla.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --data.train_path /data/xtrainer_lerobot \
+  --data.norm_stats_file assets/norm_stats/xtrainer.json \
+  --train.train_expert_only true \
+  --train.enable_mixed_precision false \
+  --train.micro_batch_size 1 \
+  --train.gradient_accumulation_steps 8 \
+  --train.global_batch_size 8 \
+  --train.output_dir /data/checkpoints/xtrainer_expert_only_smoke \
+  --train.max_steps 10 \
+  --train.save_steps 10 \
+  --train.use_wandb false
+```
+
+这里 `enable_mixed_precision false` 用于当前单卡代码路径直接按 BF16 加载模型，避免按 FP32 加载冻结的权重；不要直接套用到多卡 FSDP。确认 loss 有限、完成参数更新并导出 `.safetensors` 后，按[完整冻结训练教程](docs/FROZEN_VLM_TRAINING.md)设置正式训练步数和新输出目录。以下第 9.1 节起继续介绍全参训练。
 
 ### 9.1 默认训练策略
 
@@ -388,7 +436,7 @@ ls -lh assets/norm_stats/xtrainer.json
 | Save interval          |                     `5000` |
 | Hugging Face 权重导出  |             开启，异步保存 |
 | `torch.compile`        |                   默认关闭 |
-| W&B 日志               |     开启，与 TensorBoard 同源 |
+| W&B 日志               |  开启，与 TensorBoard 同源 |
 
 上表数值按 **8 张 A100 40GB**（`data_parallel_size=8`，`ulysses_parallel_size=1`）填写。`global_batch_size` 不是自由参数，必须严格等于下式，否则 `TrainingArguments` 在启动时直接抛 `ValueError`：
 
@@ -411,12 +459,13 @@ max_steps = ceil(目标轮次 * N / global_batch_size)
 
 按 `global_batch_size = 64` 换算，便于把默认的 `max_steps: 20000` 调成目标轮次：
 
+
 | 数据集样本数 N | 20000 步对应的轮次 | 想跑 2 轮时的 max_steps |
 | ---------------- | -------------------: | ------------------------: |
-| 50,000         |                 25.6 |                      1563 |
-| 200,000        |                  6.4 |                      6250 |
-| 640,000        |                  2.0 |                     20000 |
-| 1,280,000      |                  1.0 |                     40000 |
+| 50,000         |               25.6 |                    1563 |
+| 200,000        |                6.4 |                    6250 |
+| 640,000        |                2.0 |                   20000 |
+| 1,280,000      |                1.0 |                   40000 |
 
 X-Trainer 这类遥操作数据集规模通常在几千条 episode 量级，`max_steps: 20000` 很可能对应十几轮甚至更多，容易过拟合。**先量出 `N`（`len(dataset)` 或数据集 `meta/info.json` 的 `total_frames`），再按上表取 `max_steps`**，并保持 `save_steps` 能在一轮内至少落一次 checkpoint。
 
@@ -747,7 +796,7 @@ target[关节] += (1 - weight) * blend_offset[关节]
 
 ### 14.2 LeRobot 数据加载失败
 
-检查数据集格式是否为 v2.1、环境是否为固定的 `lerobot==0.4.2`、路径是否指向数据集根目录，以及五个必要 observation/action 字段是否存在。
+检查数据集格式是否为 v3.0、环境是否为固定的 `lerobot==0.4.2`、绝对路径是否指向数据集根目录，以及五个必要 observation/action 字段是否存在。若仍为 v2.1，先执行第 6.2 节的官方转换脚本。
 
 ### 14.3 Norm stats 报错或动作异常
 
@@ -778,23 +827,25 @@ target[关节] += (1 - weight) * blend_offset[关节]
 ## 15. 关键文件索引
 
 
-| 文件                                   | 作用                                           |
-| ---------------------------------------- | ------------------------------------------------ |
-| `tools/create_environment`             | 创建固定版本的训练环境。                       |
-| `tools/download_base_models.sh`        | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2（支持 HF / ModelScope）。 |
-| `tools/download_base_models_modelscope.sh` | 上述脚本的 ModelScope 便捷入口。           |
-| `configs/robot_configs/xtrainer.yaml`  | X-Trainer 字段、delta action 和相机映射。      |
-| `configs/vla/xtrainer/xtrainer.yaml`   | X-Trainer 全参训练配置。                       |
-| `scripts/compute_norm_stats.py`        | 计算 normalization statistics。                |
-| `tasks/vla/train_lingbotvla.py`        | 训练入口。                                     |
-| `scripts/open_loop_eval.py`            | 离线开环评估。                                 |
-| `scripts/serve_policy.py`              | WebSocket policy server。                      |
-| `scripts/serve_mock_policy.py`         | 不加载模型的保持姿态策略。                     |
-| `scripts/run_xtrainer_real.py`         | 真机推理客户端。                               |
-| `tests/run_xtrainer_basic_control.py`  | 逐关节和夹爪基础测试。                         |
-| `deploy/xtrainer_real/README.md`       | 真机客户端专项说明。                           |
-| `deploy/image_codec.py`                | 相机观测的 JPEG 传输编解码。                   |
-| `lingbotvla/utils/lora_utils.py`       | 通用 LoRA 工具；不等于 X-Trainer LoRA 已交付。 |
+| 文件                                       | 作用                                                           |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `tools/create_environment`                 | 创建固定版本的训练环境。                                       |
+| [`tools/convert_dataset_v21_to_v30.py`](tools/convert_dataset_v21_to_v30.py) | 官方 v2.1 → v3.0 转换脚本；[使用说明](tools/convert_dataset_v21_to_v30.md)。 |
+| `tools/download_base_models.sh`            | 下载 Qwen3-VL、LingBot-VLA 和 MoGe-2（支持 HF / ModelScope）。 |
+| `tools/download_base_models_modelscope.sh` | 上述脚本的 ModelScope 便捷入口。                               |
+| `configs/robot_configs/xtrainer.yaml`      | X-Trainer 字段、delta action 和相机映射。                      |
+| `configs/vla/xtrainer/xtrainer.yaml`       | X-Trainer 全参训练配置。                                       |
+| `docs/FROZEN_VLM_TRAINING.md`              | 单卡冻结 VLM 的训练教程与验证方法。                            |
+| `scripts/compute_norm_stats.py`            | 计算 normalization statistics。                                |
+| `tasks/vla/train_lingbotvla.py`            | 训练入口。                                                     |
+| `scripts/open_loop_eval.py`                | 离线开环评估。                                                 |
+| `scripts/serve_policy.py`                  | WebSocket policy server。                                      |
+| `scripts/serve_mock_policy.py`             | 不加载模型的保持姿态策略。                                     |
+| `scripts/run_xtrainer_real.py`             | 真机推理客户端。                                               |
+| `tests/run_xtrainer_basic_control.py`      | 逐关节和夹爪基础测试。                                         |
+| `deploy/xtrainer_real/README.md`           | 真机客户端专项说明。                                           |
+| `deploy/image_codec.py`                    | 相机观测的 JPEG 传输编解码。                                   |
+| `lingbotvla/utils/lora_utils.py`           | 通用 LoRA 工具；不等于 X-Trainer LoRA 已交付。                 |
 
 ---
 
@@ -807,11 +858,11 @@ target[关节] += (1 - weight) * blend_offset[关节]
 3. 基础模型、tokenizer、depth 和 video 路径与 YAML 一致。
 4. follower、leader、夹爪和三路 RealSense 均通过独立检查。
 5. 遥操作和 raw episode 采集正常。
-6. raw 数据成功转换为 LeRobot v2.1。
+6. raw 数据先转换为 LeRobot v2.1，再升级为当前训练环境需要的 v3.0。
 7. 数据集样本含 14 维 state/action、三路图像和 task。
 8. 数据集中无 NaN/Inf，三路图像与 state/action 对齐。
 9. `assets/norm_stats/xtrainer.json` 由当前训练数据生成并可解析。
-10. 全参 smoke training 完成，loss 有限且 checkpoint 可保存。
+10. 所选模式（全参或冻结 VLM）的 smoke training 完成，loss 有限且 checkpoint 可保存。
 11. 正式训练导出了 `.safetensors` 和配套 `lingbotvla_cli.yaml`。
 12. 离线开环评估可输出 MSE、MAE 和轨迹图。
 13. policy server 能加载 checkpoint，`/healthz` 正常。

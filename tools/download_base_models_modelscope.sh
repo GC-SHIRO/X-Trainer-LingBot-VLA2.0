@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Convenience wrapper: download the LingBot-VLA 2.0 base models from ModelScope.

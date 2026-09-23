@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Reproducible LingBot-VLA 2.0 training environment for Ubuntu 24.04 x86_64.
+# Reproducible LingBot-VLA 2.0 training environment for Ubuntu 22.04/24.04 x86_64.
 # This script only manages the Conda/Python environment. It does not install
 # system packages, CUDA drivers/toolkits, models, or datasets.
 
@@ -32,6 +32,7 @@ FLASH_ATTN_VERSION="2.8.3"
 LEROBOT_VERSION="0.4.2"
 WANDB_VERSION="0.21.0"
 MIN_DRIVER_VERSION="570.26"
+MIN_GLIBC_VERSION="2.35"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -70,7 +71,7 @@ usage() {
   cat <<'USAGE'
 Usage: bash tools/create_environment [OPTIONS]
 
-Create the complete LingBot-VLA 2.0 Python environment for Ubuntu 24.04:
+Create the complete LingBot-VLA 2.0 Python environment for Ubuntu 22.04 or 24.04:
   - Python 3.12
   - PyTorch 2.8.0 + CUDA 12.8 wheels
   - Transformers 4.57.3 / Hugging Face Hub 0.34.3
@@ -220,9 +221,19 @@ preflight_system() {
   else
     # shellcheck disable=SC1091
     source /etc/os-release
-    if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
-      warn "recommended Ubuntu 24.04; detected ${PRETTY_NAME:-unknown}; continuing"
+    if [[ "${ID:-}" != "ubuntu" ]]; then
+      warn "supported hosts are Ubuntu 22.04/24.04; detected ${PRETTY_NAME:-unknown}; continuing"
       system_ok=0
+    else
+      case "${VERSION_ID:-}" in
+        22.04|24.04)
+          log "supported Ubuntu release detected: ${PRETTY_NAME:-Ubuntu ${VERSION_ID}}"
+          ;;
+        *)
+          warn "supported Ubuntu releases are 22.04 and 24.04; detected ${PRETTY_NAME:-unknown}; continuing"
+          system_ok=0
+          ;;
+      esac
     fi
   fi
 
@@ -232,8 +243,8 @@ preflight_system() {
     glibc_version_line="$(ldd --version 2>/dev/null)"
     glibc_version_line="${glibc_version_line%%$'\n'*}"
     glibc_version="${glibc_version_line##* }"
-    if ! version_ge "${glibc_version}" "2.39"; then
-      warn "glibc >=2.39 is recommended for this environment; detected ${glibc_version}"
+    if ! version_ge "${glibc_version}" "${MIN_GLIBC_VERSION}"; then
+      warn "glibc >=${MIN_GLIBC_VERSION} is required for Ubuntu 22.04 compatibility; detected ${glibc_version}"
       system_ok=0
     fi
   else

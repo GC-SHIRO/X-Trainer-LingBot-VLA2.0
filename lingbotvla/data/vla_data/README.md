@@ -7,7 +7,7 @@ The default data path is a **single LeRobot dataset**. If you want to train on m
 
 LingBot-VLA 2.0 loads downstream data through the [LeRobot](https://github.com/huggingface/lerobot) library (`LeRobotDataset`). Each dataset entry can be a HuggingFace repo id or a local LeRobot dataset directory.
 
-Both **LeRobot v2.1** and **LeRobot v3.0** layouts are supported directly. You do not need to merge datasets or convert v2.1 data to v3.0 before training.
+The pinned **lerobot==0.4.2** environment requires **LeRobot v3.0** datasets. Convert existing v2.1 data with the bundled [official converter](../../../tools/convert_dataset_v21_to_v30.md) before computing normalization statistics or training. Legacy import fallbacks do not provide v2.1 format support in this environment.
 
 ## 2. Prepare Dataset Input
 
@@ -310,7 +310,7 @@ bash train.sh tasks/vla/train_lingbotvla.py ./configs/vla/robotwin/robotwin.yaml
 
 ## Quick Checklist
 
-- Dataset entries are LeRobot v2.1 or v3.0 repos/local directories.
+- Dataset entries are LeRobot v3.0 repos/local directories in the pinned environment; convert v2.1 data first.
 - Single dataset: `data.data_name` is the robot config name, for example `robotwin`, and `data.train_path` points to one LeRobot dataset directory.
 - Multiple datasets: `data.data_name` is `multi`, and `data.train_path` points to a text file whose first column is the robot config name, for example `robotwin`.
 - `configs/robot_configs/robotwin.yaml` exists.
