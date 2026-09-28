@@ -14,6 +14,7 @@ RECREATE=0
 RESUME=0
 SKIP_SYSTEM_CHECK=1
 STRICT_SYSTEM_CHECK=0
+export LINGBOT_SKIP_GPU_CHECK=0
 FORCE_BUILD_FLASH_ATTN=0
 CURRENT_STAGE="initialization"
 FLASH_ATTN_WHEEL="${FLASH_ATTN_WHEEL:-}"
@@ -92,6 +93,7 @@ Options:
   --force-build-flash-attn     Compile FlashAttention locally with nvcc
   --max-build-jobs N           Parallel jobs for a local FA build (default: 8)
   --skip-system-check          Skip Ubuntu/driver/GPU preflight checks (default)
+  --skip-gpu-check             Install without GPU/driver checks (cloud CPU-only setup)
   --strict-system-check        Fail when the preflight detects unsupported system settings
   -h, --help                   Show this help
 
@@ -103,6 +105,7 @@ Environment overrides:
 Examples:
   bash tools/create_environment --recreate
   bash tools/create_environment --resume
+  bash tools/create_environment --skip-gpu-check
   bash tools/create_environment \
     --flash-attn-wheel /path/to/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 USAGE
@@ -140,6 +143,10 @@ while [[ $# -gt 0 ]]; do
     --skip-system-check)
       SKIP_SYSTEM_CHECK=1
       STRICT_SYSTEM_CHECK=0
+      shift
+      ;;
+    --skip-gpu-check)
+      LINGBOT_SKIP_GPU_CHECK=1
       shift
       ;;
     --strict-system-check)
@@ -252,42 +259,46 @@ preflight_system() {
     system_ok=0
   fi
 
-  local driver_version=""
-  local driver_version_output=""
-  if check_command nvidia-smi; then
-    if driver_version_output="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"; then
-      driver_version_output="${driver_version_output%%$'\n'*}"
-      driver_version="${driver_version_output//[[:space:]]/}"
-      if [[ -n "${driver_version}" ]]; then
-        if ! version_ge "${driver_version}" "${MIN_DRIVER_VERSION}"; then
-          warn "NVIDIA driver >=${MIN_DRIVER_VERSION} is recommended for CUDA 12.8; detected ${driver_version}"
+  if [[ "${LINGBOT_SKIP_GPU_CHECK}" == "1" ]]; then
+    warn "GPU/driver preflight checks skipped by --skip-gpu-check"
+  else
+    local driver_version=""
+    local driver_version_output=""
+    if check_command nvidia-smi; then
+      if driver_version_output="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"; then
+        driver_version_output="${driver_version_output%%$'\n'*}"
+        driver_version="${driver_version_output//[[:space:]]/}"
+        if [[ -n "${driver_version}" ]]; then
+          if ! version_ge "${driver_version}" "${MIN_DRIVER_VERSION}"; then
+            warn "NVIDIA driver >=${MIN_DRIVER_VERSION} is recommended for CUDA 12.8; detected ${driver_version}"
+            system_ok=0
+          fi
+        else
+          warn "could not read the NVIDIA driver version"
           system_ok=0
         fi
       else
-        warn "could not read the NVIDIA driver version"
+        warn "nvidia-smi could not report the driver version; GPU validation skipped"
         system_ok=0
       fi
+
+      local compute_caps
+      if compute_caps="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)"; then
+        while IFS= read -r compute_cap; do
+          compute_cap="$(printf '%s' "${compute_cap}" | tr -d '[:space:]')"
+          [[ -z "${compute_cap}" ]] && continue
+          if ! awk -v cap="${compute_cap}" 'BEGIN { exit !(cap + 0 >= 8.0) }'; then
+            warn "FlashAttention 2 recommends compute capability >=8.0; detected ${compute_cap}"
+            system_ok=0
+          fi
+        done <<<"${compute_caps}"
+      else
+        warn "nvidia-smi cannot report compute capability; the post-install CUDA check will validate the GPU"
+      fi
     else
-      warn "nvidia-smi could not report the driver version; GPU validation skipped"
+      warn "nvidia-smi is not available; GPU/driver validation skipped"
       system_ok=0
     fi
-
-    local compute_caps
-    if compute_caps="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)"; then
-      while IFS= read -r compute_cap; do
-        compute_cap="$(printf '%s' "${compute_cap}" | tr -d '[:space:]')"
-        [[ -z "${compute_cap}" ]] && continue
-        if ! awk -v cap="${compute_cap}" 'BEGIN { exit !(cap + 0 >= 8.0) }'; then
-          warn "FlashAttention 2 recommends compute capability >=8.0; detected ${compute_cap}"
-          system_ok=0
-        fi
-      done <<<"${compute_caps}"
-    else
-      warn "nvidia-smi cannot report compute capability; the post-install CUDA check will validate the GPU"
-    fi
-  else
-    warn "nvidia-smi is not available; GPU/driver validation skipped"
-    system_ok=0
   fi
 
   if [[ "${STRICT_SYSTEM_CHECK}" == "1" && "${system_ok}" == "0" ]]; then
@@ -340,6 +351,7 @@ assert_core_stack() {
   python - <<'PY'
 from importlib.metadata import version
 
+import os
 import torch
 
 expected = {
@@ -360,18 +372,20 @@ for package, wanted in expected.items():
     assert actual == wanted, f"{package} changed: expected {wanted}, got {version(package)}"
 
 assert torch.version.cuda == "12.8", f"expected a cu128 PyTorch wheel, got CUDA {torch.version.cuda}"
-assert torch.cuda.is_available(), "PyTorch cannot access CUDA"
-for device_index in range(torch.cuda.device_count()):
-    capability = torch.cuda.get_device_capability(device_index)
-    assert capability >= (8, 0), (
-        f"GPU {device_index} has compute capability {capability}; FlashAttention 2 requires >=(8, 0)"
-    )
+skip_gpu_check = os.environ.get("LINGBOT_SKIP_GPU_CHECK") == "1"
+if not skip_gpu_check:
+    assert torch.cuda.is_available(), "PyTorch cannot access CUDA"
+    for device_index in range(torch.cuda.device_count()):
+        capability = torch.cuda.get_device_capability(device_index)
+        assert capability >= (8, 0), (
+            f"GPU {device_index} has compute capability {capability}; FlashAttention 2 requires >=(8, 0)"
+        )
 
 print(
     "core stack ok:",
     f"torch={torch.__version__}",
     f"cuda={torch.version.cuda}",
-    f"gpus={torch.cuda.device_count()}",
+    f"gpus={'unchecked' if skip_gpu_check else torch.cuda.device_count()}",
     f"cxx11abi={torch._C._GLIBCXX_USE_CXX11_ABI}",
 )
 PY
@@ -435,6 +449,7 @@ import cv2
 import flash_attn
 import huggingface_hub
 import mlflow
+import os
 import torch
 import transformers
 import trimesh
@@ -454,7 +469,10 @@ print("huggingface_hub", huggingface_hub.__version__)
 print("accelerate", accelerate.__version__)
 print("wandb", wandb.__version__)
 print("Qwen3-VL and LingBot depth imports ok")
-print("GPU", torch.cuda.get_device_name(0))
+if os.environ.get("LINGBOT_SKIP_GPU_CHECK") == "1":
+    print("GPU validation skipped; CUDA runtime must be validated after GPU allocation")
+else:
+    print("GPU", torch.cuda.get_device_name(0))
 PY
 
   if ! command -v hf >/dev/null 2>&1; then
@@ -472,6 +490,10 @@ PY
     log "pip dependency metadata check passed"
   fi
 }
+
+if [[ "${LINGBOT_SKIP_GPU_CHECK}" == "1" ]]; then
+  warn "GPU checks disabled; installing CUDA packages for later use after GPU allocation"
+fi
 
 require_command conda
 require_command git
@@ -553,11 +575,13 @@ python -m pip install --no-cache-dir \
   "torchcodec==${TORCHCODEC_VERSION}"
 
 python - <<'PY'
+import os
 import torch
 
 assert torch.__version__.split("+", 1)[0] == "2.8.0", torch.__version__
 assert torch.version.cuda == "12.8", torch.version.cuda
-assert torch.cuda.is_available(), "PyTorch cannot access CUDA"
+if os.environ.get("LINGBOT_SKIP_GPU_CHECK") != "1":
+    assert torch.cuda.is_available(), "PyTorch cannot access CUDA"
 print("torch bootstrap ok", torch.__version__, torch.version.cuda)
 PY
 stage_done
@@ -616,5 +640,8 @@ validate_environment
 stage_done
 
 log "environment ready: ${ENV_NAME}"
+if [[ "${LINGBOT_SKIP_GPU_CHECK}" == "1" ]]; then
+  warn "GPU runtime not validated; after GPU allocation rerun: bash tools/create_environment --env-name ${ENV_NAME} --resume --strict-system-check"
+fi
 log "activate with: conda activate ${ENV_NAME}"
 log "models and datasets were not downloaded"

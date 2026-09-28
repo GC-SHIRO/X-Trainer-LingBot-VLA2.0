@@ -143,6 +143,24 @@ conda activate lingbotvla
 bash tools/create_environment --resume
 ```
 
+云平台尚未申请或分配显卡时，可以先安装完整环境：
+
+```bash
+bash tools/create_environment --skip-gpu-check
+# 如果环境已存在或之前安装中断：
+bash tools/create_environment --resume --skip-gpu-check
+```
+
+`--skip-gpu-check` 跳过 NVIDIA 驱动、GPU 算力、PyTorch CUDA 可用性和显卡名称检查；仍安装 CUDA 12.8 版 PyTorch、FlashAttention 等完整依赖，并校验版本和模块导入。这不是 CPU 训练模式。默认使用预编译 FlashAttention wheel，无需本机 GPU 或 CUDA toolkit；若指定 `--force-build-flash-attn`，仍需本机 CUDA toolkit 和编译工具。
+
+`--skip-system-check`（默认）只跳过安装前的系统检查，不能代替 `--skip-gpu-check`。后者也可与 `--strict-system-check` 一起使用，此时仍严格检查操作系统、架构和 glibc。
+
+申请显卡后，在同一环境中去掉 `--skip-gpu-check` 重新验证（自定义环境需补上 `--env-name NAME`）：
+
+```bash
+bash tools/create_environment --resume --strict-system-check
+```
+
 如已有匹配 Python、Torch 和 CUDA ABI 的 FlashAttention wheel：
 
 ```bash
