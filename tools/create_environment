@@ -16,6 +16,7 @@ SKIP_SYSTEM_CHECK=1
 STRICT_SYSTEM_CHECK=0
 export LINGBOT_SKIP_GPU_CHECK=0
 FORCE_BUILD_FLASH_ATTN=0
+export LINGBOT_SKIP_FLASH_ATTN=0
 CURRENT_STAGE="initialization"
 FLASH_ATTN_WHEEL="${FLASH_ATTN_WHEEL:-}"
 FLASH_BUILD_JOBS="${FLASH_BUILD_JOBS:-8}"
@@ -91,6 +92,7 @@ Options:
   --resume                     Reconcile an existing environment in place
   --flash-attn-wheel PATH      Install a local FlashAttention wheel
   --force-build-flash-attn     Compile FlashAttention locally with nvcc
+  --skip-flash-attn            Skip FlashAttention installation and related validation
   --max-build-jobs N           Parallel jobs for a local FA build (default: 8)
   --skip-system-check          Skip Ubuntu/driver/GPU preflight checks (default)
   --skip-gpu-check             Install without GPU/driver checks (cloud CPU-only setup)
@@ -135,6 +137,10 @@ while [[ $# -gt 0 ]]; do
       FORCE_BUILD_FLASH_ATTN=1
       shift
       ;;
+    --skip-flash-attn)
+      LINGBOT_SKIP_FLASH_ATTN=1
+      shift
+      ;;
     --max-build-jobs)
       [[ $# -ge 2 ]] || die "--max-build-jobs requires a value"
       FLASH_BUILD_JOBS="$2"
@@ -168,6 +174,8 @@ done
   die "--recreate and --resume are mutually exclusive"
 [[ "${FORCE_BUILD_FLASH_ATTN}" == "0" || -z "${FLASH_ATTN_WHEEL}" ]] || \
   die "--force-build-flash-attn and --flash-attn-wheel are mutually exclusive"
+[[ "${LINGBOT_SKIP_FLASH_ATTN}" == "0" || ( "${FORCE_BUILD_FLASH_ATTN}" == "0" && -z "${FLASH_ATTN_WHEEL}" ) ]] || \
+  die "--skip-flash-attn cannot be combined with --force-build-flash-attn or FLASH_ATTN_WHEEL/--flash-attn-wheel"
 [[ "${ENV_NAME}" =~ ^[A-Za-z0-9._-]+$ ]] || \
   die "invalid Conda environment name: ${ENV_NAME}"
 [[ "${FLASH_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]] || \
@@ -446,7 +454,6 @@ validate_environment() {
   python - <<'PY'
 import accelerate
 import cv2
-import flash_attn
 import huggingface_hub
 import mlflow
 import os
@@ -458,17 +465,21 @@ import wandb
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from mdm.model.v2 import MDMModel
 from moge.model.v2 import MoGeModel
-from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
-
-assert "flash_attention_2" in ALL_ATTENTION_FUNCTIONS
+if os.environ.get("LINGBOT_SKIP_FLASH_ATTN") == "1":
+    print("FlashAttention and Qwen3-VL model import validation skipped; install FlashAttention manually before training")
+else:
+    import flash_attn
+    from transformers.modeling_layers import GradientCheckpointingLayer
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+    assert "flash_attention_2" in ALL_ATTENTION_FUNCTIONS
+    print("Qwen3-VL model import ok")
 print("transformers", transformers.__version__)
 print("huggingface_hub", huggingface_hub.__version__)
 print("accelerate", accelerate.__version__)
 print("wandb", wandb.__version__)
-print("Qwen3-VL and LingBot depth imports ok")
+print("Qwen3-VL config and LingBot depth imports ok")
 if os.environ.get("LINGBOT_SKIP_GPU_CHECK") == "1":
     print("GPU validation skipped; CUDA runtime must be validated after GPU allocation")
 else:
@@ -607,10 +618,14 @@ python -m pip install --no-cache-dir "wandb==${WANDB_VERSION}"
 assert_core_stack
 stage_done
 
-stage_begin "install FlashAttention"
-install_flash_attention
-assert_core_stack
-stage_done
+if [[ "${LINGBOT_SKIP_FLASH_ATTN}" == "1" ]]; then
+  warn "FlashAttention installation skipped; existing package is left unchanged"
+else
+  stage_begin "install FlashAttention"
+  install_flash_attention
+  assert_core_stack
+  stage_done
+fi
 
 stage_begin "install LeRobot and local vision packages"
 log "installing LeRobot ${LEROBOT_VERSION} without its incompatible resolver constraints"
@@ -640,6 +655,9 @@ validate_environment
 stage_done
 
 log "environment ready: ${ENV_NAME}"
+if [[ "${LINGBOT_SKIP_FLASH_ATTN}" == "1" ]]; then
+  warn "FlashAttention was not installed or validated; install it manually before training"
+fi
 if [[ "${LINGBOT_SKIP_GPU_CHECK}" == "1" ]]; then
   warn "GPU runtime not validated; after GPU allocation rerun: bash tools/create_environment --env-name ${ENV_NAME} --resume --strict-system-check"
 fi
