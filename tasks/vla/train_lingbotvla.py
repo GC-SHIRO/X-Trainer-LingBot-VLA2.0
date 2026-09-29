@@ -840,7 +840,17 @@ def main():
                         # torch.cuda.synchronize()
                         depth_forward_time = time.time() - depth_start_time
 
-                with model_fwd_context:
+                # Single-GPU BF16 loading has no FSDP policy to cast FP32
+                # dataset inputs (state/actions) before the model's linear layers.
+                with model_fwd_context, torch.autocast(
+                    "cuda",
+                    dtype=torch.bfloat16,
+                    enabled=(
+                        args.train.world_size == 1
+                        and not args.train.enable_mixed_precision
+                        and not args.train.enable_fp32
+                    ),
+                ):
                     # torch.cuda.synchronize()
                     model_outputs = model(
                         **micro_batch,
