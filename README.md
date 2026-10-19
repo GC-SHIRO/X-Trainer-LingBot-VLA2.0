@@ -1,39 +1,368 @@
-# X-Trainer LingBot-VLA 2.0
+# X-Trainer 部署 LingBot-VLA 2.0 手册
 
-本仓库为 LingBot-VLA 2.0 后训练添加了通用 X-Trainer 数据映射。
+版本：V2.0
+更新日期：2026-10-13
+适用代码：`GC-SHIRO/X-Trainer-LingBot-VLA2.0` `main`
 
-## 数据约定
+---
 
-通用机器人配置为 [`configs/robot_configs/xtrainer.yaml`](configs/robot_configs/xtrainer.yaml)，要求 LeRobot v2.1 数据集包含以下字段：
+## 1. 文档目标
 
+本文用于在 Dobot X-Trainer 双臂平台上完成 LingBot-VLA 2.0 的基础模型准备、后训练（全参微调）、开环评估和真机部署。
 
-| 字段                             | 形状    | 含义                                        |
-| ---------------------------------- | --------- | --------------------------------------------- |
-| `observation.state`              | `(14,)` | 左臂 6 关节 + 左夹爪 + 右臂 6 关节 + 右夹爪 |
-| `action`                         | `(14,)` | 维度顺序与`observation.state` 相同          |
-| `observation.images.top`         | image   | 顶部相机                                    |
-| `observation.images.left_wrist`  | image   | 左腕相机                                    |
-| `observation.images.right_wrist` | image   | 右腕相机                                    |
-
-动作处理与 X-Trainer Pi0.5-JAX 保持一致：12 维机械臂关节动作由绝对目标转换为 delta action，两个夹爪动作保持 absolute。
-
-## 训练流程
+主流程：
 
 ```text
-X-Trainer 示教数据
-  -> LeRobot 数据集
-  -> 检查 14 维 state/action 和三路相机字段
-  -> 计算 X-Trainer normalization statistics
-  -> 全参微调或 LoRA
+基础模型下载 -> 训练环境部署 -> LeRobot 数据集准备 -> 机器人配置映射
+-> 计算归一化统计 -> 全参微调 -> 开环评估 -> 策略服务 -> 真机执行
 ```
 
-### 计算归一化统计
+本文所有命令默认在仓库根目录、Linux/Bash 环境下执行，路径请替换为实际值。
+
+**注意：本仓库不包含数据采集代码。** X-Trainer 的遥操作采集、raw 数据结构和 LeRobot 转换脚本位于另册，采集流程请参考同目录的 `X-Trainer-XVLA` 手册第 5 至第 7 节。本文从"已经拿到 LeRobot 数据集"开始。
+
+## 2. 总体架构
+
+### 2.1 端到端流程
+
+```text
+X-Trainer 示教数据（LeRobot v2.1 / v3.0）
+    -> configs/robot_configs/xtrainer.yaml        特征映射
+    -> scripts/compute_norm_stats.py              归一化统计
+    -> assets/norm_stats/xtrainer.json
+    -> tasks/vla/train_lingbotvla.py              全参微调
+    -> <output_dir>/checkpoints/global_step_N/hf_ckpt
+    -> scripts/serve_policy.py                    WebSocket 策略服务
+    -> scripts/run_xtrainer_real.py               真机客户端
+```
+
+开环评估（`scripts/open_loop_eval.py`）位于微调和真机部署之间，用于在不上机的前提下比较预测动作与数据集真值。
+
+### 2.2 项目分工
+
+| 模块 | 位置 | 作用 |
+|---|---|---|
+| 训练入口 | `tasks/vla/train_lingbotvla.py` | LingBot-VLA 2.0 后训练主程序。 |
+| 分布式启动 | `train.sh` | `torchrun` 封装，自动探测可见 GPU 数并写 `log.txt`。 |
+| 归一化统计 | `scripts/compute_norm_stats.py` | 统计 state/action 的 mean/std，生成 JSON。 |
+| 开环评估 | `scripts/open_loop_eval.py` | 单轨迹动作对比，输出 MSE/MAE 与曲线图。 |
+| 数据加载 | `lingbotvla/data/vla_data/` | LeRobot v2.1/v3.0 加载、多数据集拼接、特征映射。 |
+| 机器人配置 | `configs/robot_configs/*.yaml` | raw 特征名到统一特征空间的映射。 |
+| VLA 训练配置 | `configs/vla/<robot>/<robot>.yaml` | 模型、数据、并行、优化器、MoE、对齐参数。 |
+| 策略封装 | `deploy/lingbot_vla_v2_policy.py` | `LingbotVLAv2Server`，加载 checkpoint 与归一化器。 |
+| 服务端 | `deploy/websocket_policy_server.py` | WebSocket + MessagePack 服务，提供 `/healthz`。 |
+| 客户端 | `deploy/websocket_client_policy.py` | `WebsocketClientPolicy`，读取服务端 metadata。 |
+| 真机环境 | `deploy/xtrainer_real/` | Dobot、RealSense、Feetech 封装与最小真机客户端环境。 |
+| 环境构建 | `tools/create_train_env.sh` | 创建 Python 3.12 conda 环境并锁定依赖。 |
+| 模型下载 | `download_base_models.sh` / `.ps1` | 下载 Qwen3-VL、LingBot-VLA v2.6B、MoGe-2。 |
+| 配置说明 | `docs/config/lingbotvla_config_doc.md`、`configs/vla/Training_Config.md` | 全部训练参数的含义与取值建议。 |
+
+### 2.3 关键数据契约
+
+X-Trainer 的状态和真实动作均为 **14 维**，顺序固定：
+
+| 索引 | 内容 |
+|---|---|
+| `0-5` | 左臂关节 1-6，弧度 |
+| `6` | 左夹爪，归一化到 `[0,1]` |
+| `7-12` | 右臂关节 1-6，弧度 |
+| `13` | 右夹爪，归一化到 `[0,1]` |
+
+视觉字段固定为 `observation.images.top`、`observation.images.left_wrist`、`observation.images.right_wrist`，语言输入为 `task` 字符串。
+
+`configs/robot_configs/xtrainer.yaml` 把这 14 维拆成统一特征空间：
+
+| 统一特征 | 原始切片 | 维度 | 说明 |
+|---|---|---|---|
+| `observation.state.arm.position` | `observation.state[0:6)` + `[7:13)` | 12 | 双臂关节。 |
+| `observation.state.effector.position` | `observation.state[6:7)` + `[13:14)` | 2 | 左右夹爪。 |
+| `action.arm.position` | `action[0:6)` + `[7:13)` | 12 | **`subtract_state: true`**，学习相对当前状态的增量。 |
+| `action.effector.position` | `action[6:7)` + `[13:14)` | 2 | **`subtract_state: false`**，学习绝对目标值。 |
+
+也就是说：**12 维机械臂动作是相对当前 state 的 delta，两个夹爪动作保持 absolute**。这一点必须与训练时的配置保持一致，不要在推理侧自行改成绝对关节角。
+
+相机映射：
+
+| 统一名称 | 原始键 |
+|---|---|
+| `observation.images.camera_top` | `observation.images.top` |
+| `observation.images.camera_wrist_left` | `observation.images.left_wrist` |
+| `observation.images.camera_wrist_right` | `observation.images.right_wrist` |
+
+## 3. 硬件和软件前置条件
+
+### 3.1 硬件组成
+
+| 硬件 | 数量 | 用途 |
+|---|---|---|
+| Dobot follower 机械臂 | 2 | 执行动作。 |
+| leader 主手 | 2 | 输入遥操作动作（采集阶段）。 |
+| Feetech / STS 夹爪 | 2 | 左右夹爪。 |
+| Intel RealSense | 3 | 顶部、左腕、右腕图像。 |
+| GPU 训练机 | 1 | 微调与策略服务。 |
+| 机器人控制机 | 1 | 运行真机客户端，连接机械臂与相机。 |
+
+### 3.2 网络和设备约定
+
+```text
+左臂 follower: 192.168.5.1
+右臂 follower: 192.168.5.2
+左夹爪串口:   /dev/ttyUSB1   舵机 ID 21
+右夹爪串口:   /dev/ttyUSB0   舵机 ID 22
+```
+
+```bash
+ping 192.168.5.1
+ping 192.168.5.2
+ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
+```
+
+相机接线约定（由 `deploy/xtrainer_real/environment.py` 决定）：
+
+- 顶部相机 `cam_top` 与左腕相机 `cam_left_wrist` 挂在**左臂** follower 上。
+- 右腕相机 `cam_right_wrist` 挂在**右臂** follower 上。
+
+`/dev/ttyUSB*` 的实际编号会随插拔顺序变化，首次上机必须逐个确认，不能按枚举顺序假定左右。
+
+### 3.3 系统与依赖建议
+
+- 操作系统：Ubuntu（`tools/create_train_env.sh` 为 bash 脚本；`scripts/compute_norm_stats.py` 内部使用 `multiprocessing` 的 `fork` 启动方式，**不适用于 Windows**）。
+- Python 3.12，PyTorch 2.8.0 + CUDA。训练环境构建脚本会断言 `torch.cuda.is_available()`。
+- 需要可用的 NVIDIA 驱动；`train.sh` 通过 `nvidia-smi -L` 统计 GPU 数量。
+- flash-attn 2.8.3（默认从 pip 安装，也可用本地 wheel）。
+- 训练侧依赖见 `requirements.txt` 与 `requirements-depth.txt`；真机客户端依赖见 `deploy/xtrainer_real/requirements.txt`（`pyrealsense2`、`pyserial`、`websockets`、`msgpack` 等，无需 torch）。
+
+## 4. 环境部署
+
+在仓库根目录执行：
+
+```bash
+bash tools/create_train_env.sh
+conda activate lingbotvla
+```
+
+脚本参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--env-name NAME` | 自定义环境名，默认 `lingbotvla`。 |
+| `--recreate` | 删除并重建同名环境。 |
+| `--resume` | 向已存在的环境继续安装。 |
+| `--flash-attn-wheel PATH` | 从本地 wheel 安装 flash-attn，避免现场编译。 |
+
+脚本会按顺序完成：创建 Python 3.12 环境、安装 torch 2.8.0 栈、安装 `requirements.txt`、安装 `numpydantic==1.9.0`、安装 flash-attn、以 `--no-deps` 安装 `lerobot v0.4.2`、以可编辑方式安装本仓库、安装 `requirements-depth.txt`、可编辑安装 `lingbot-depth` 与 `MoGe`，最后把 `huggingface_hub` 固定到 `0.34.0`。
+
+脚本不安装显卡驱动、不下载模型，也不修改串口权限。`lerobot` 与深度子包是有意用 `--no-deps` 安装的，因此脚本结尾的 `pip check` 可能报告依赖元数据问题，属预期现象。
+
+机器人控制机只需要轻量客户端依赖：
+
+```bash
+pip install -r deploy/xtrainer_real/requirements.txt
+```
+
+## 5. 基础模型下载
+
+需要先有新版 Hugging Face CLI：
+
+```bash
+pip install -U huggingface_hub
+```
+
+然后在仓库根目录执行：
+
+```bash
+bash download_base_models.sh
+```
+
+Windows 下可使用 `download_base_models.ps1`。
+
+脚本下载三个目标到 `models/`：
+
+| 目标 | 来源 | 落地路径 |
+|---|---|---|
+| Qwen3-VL-4B-Instruct | `Qwen/Qwen3-VL-4B-Instruct` | `models/Qwen3-VL-4B-Instruct` |
+| LingBot-VLA v2.6B | `robbyant/lingbot-vla-v2-6b` | `models/lingbot-vla-v2-6b` |
+| MoGe-2 ViT-B Normal | `Ruicheng/moge-2-vitb-normal` 的 `model.pt` | `models/MoRGBD/moge2-vitb-normal.pt` |
+
+LingBot 仓库内已包含 LingBot-Depth 与 Video-DINO 教师，无需单独下载。如需替换来源：
+
+```bash
+LINGBOT_REPOSITORY=<owner/repository> bash download_base_models.sh
+```
+
+也可以用仓库内的通用脚本单独拉取：
+
+```bash
+python scripts/download_hf_model.py --repo_id <owner/model> --local_dir <目录>
+python scripts/download_hf_data.py  --repo_id <owner/dataset> --local_dir <目录>
+```
+
+部署端加载 base model 时，可以用 `QWEN3VL_PATH` 环境变量覆盖训练配置里记录的 tokenizer 路径。
+
+**重要：`train.sh` 会强制打开离线模式**（`HF_HUB_OFFLINE=1`、`HF_DATASETS_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`）。因此基础模型和数据集必须在启动训练前就落到本地，否则训练会直接失败。
+
+## 6. 数据准备（LeRobot 数据集）
+
+LingBot-VLA 2.0 通过 LeRobot 的 `LeRobotDataset` 读取数据，**同时支持 LeRobot v2.1 和 v3.0 目录布局**，不需要为了训练做格式转换或数据集合并。
+
+每个数据集条目可以是 Hugging Face repo id，也可以是本地 LeRobot 数据集目录。至少需要包含：
+
+| 字段 | 形状 | 含义 |
+|---|---|---|
+| `observation.state` | `(14,)` | 左臂 6 关节 + 左夹爪 + 右臂 6 关节 + 右夹爪 |
+| `action` | `(14,)` | 维度顺序与 `observation.state` 相同 |
+| `observation.images.top` | image | 顶部相机 |
+| `observation.images.left_wrist` | image | 左腕相机 |
+| `observation.images.right_wrist` | image | 右腕相机 |
+| `task` | text | 自然语言任务描述 |
+
+### 6.1 单个数据集
+
+把 `data.data_name` 设为机器人配置名（`xtrainer`），`data.train_path` 指向数据集目录：
+
+```yaml
+data:
+  datasets_type: vla
+  data_name: xtrainer
+  train_path: /path/to/lerobot_dataset
+  robot_config_root: ./configs/robot_configs
+```
+
+### 6.2 多个数据集
+
+把 `data.data_name` 设为 `multi`，`data.train_path` 指向一个**文本清单文件**。每个非空行两列，用空格分隔：
+
+```text
+xtrainer /path/to/lerobot_dataset_a
+xtrainer /path/to/lerobot_dataset_b
+```
+
+`MultiVLADataset` 会在运行时逐行实例化并拼接，替代了早先"先合并数据集"的做法。
+
+可参考 `assets/training_data/robotwin.txt` 的格式。
+
+## 7. 机器人配置（`configs/robot_configs/xtrainer.yaml`）
+
+机器人配置负责把 raw LeRobot 字段映射到统一特征空间，完整内容如下：
+
+```yaml
+states:
+  - observation.state.arm.position:
+      origin_keys:
+        - observation.state: {start: 0, end: 6}
+        - observation.state: {start: 7, end: 13}
+
+  - observation.state.effector.position:
+      origin_keys:
+        - observation.state: {start: 6, end: 7}
+        - observation.state: {start: 13, end: 14}
+
+actions:
+  - action.arm.position:
+      origin_keys:
+        - action: {start: 0, end: 6}
+        - action: {start: 7, end: 13}
+      subtract_state: true
+
+  - action.effector.position:
+      origin_keys:
+        - action: {start: 6, end: 7}
+        - action: {start: 13, end: 14}
+      subtract_state: false
+
+images:
+  - observation.images.camera_top:
+      origin_keys: observation.images.top
+  - observation.images.camera_wrist_left:
+      origin_keys: observation.images.left_wrist
+  - observation.images.camera_wrist_right:
+      origin_keys: observation.images.right_wrist
+
+norm_stats: assets/norm_stats/xtrainer.json
+```
+
+规则：
+
+- `states` 与 `actions` 结构相同，同一 raw 张量的多个切片按顺序拼接。
+- `subtract_state: true` 表示该动作特征是"相对当前 state 的增量"，`false` 表示绝对动作。真实机器人数据推荐机械臂用 `true`、夹爪用 `false`。
+- `images` 支持简写：raw 键与目标键同名时可以直接写一行 `- observation.images.camera_top`。
+- `norm_stats` 指向归一化统计 JSON，训练时会读取该字段。
+- 机器人配置中出现的 `<joint_type>`（`observation.state.<joint_type>` / `action.<joint_type>`）必须已经在 VLA 训练配置的 `data.joints` 中声明；相机名必须出现在 `data.cameras` 中。使用未声明的类型会在运行时抛出 `ValueError`。
+
+本仓库另附 `configs/robot_configs/xtrainer_clothes.yaml`，它与 `xtrainer.yaml` 的唯一区别是 `norm_stats` 指向 `assets/norm_stats/xtrainer_clothes.json`，用于区分不同任务的统计量。
+
+## 8. 训练配置（`configs/vla/xtrainer/xtrainer.yaml`）
+
+训练配置决定模型结构、数据声明和训练超参。X-Trainer 相关部分的关键值：
+
+```yaml
+model:
+  model_path: ./models/lingbot-vla-v2-6b
+  tokenizer_path: ./models/Qwen3-VL-4B-Instruct
+  config_key: LingbotVLAV2Config
+  moe_implementation: fused
+
+data:
+  datasets_type: vla
+  data_name: xtrainer
+  train_path: /path/to/lerobot_dataset
+  robot_config_root: ./configs/robot_configs
+  joints:
+    - arm.position: 14
+    - effector.position: 2
+  cameras:
+    - camera_top
+    - camera_wrist_left
+    - camera_wrist_right
+  norm_stats_file: assets/norm_stats/xtrainer.json
+  num_workers: 8
+  use_future_image: true
+
+train:
+  output_dir: /path/to/save_ckpt
+  action_dim: 55
+  max_action_dim: 55
+  max_state_dim: 55
+  optimizer: muon
+  lr: 5.0e-5
+  micro_batch_size: 1
+  gradient_accumulation_steps: 1
+  max_steps: 40000
+  save_steps: 40000
+  enable_fp32: true
+  enable_resume: true
+  use_wandb: false
+  use_compile: true
+  ckpt_manager: dcp
+```
+
+必须保持一致的约束：
+
+- `data.joints` 与 `data.cameras` 必须覆盖机器人配置用到的全部关节类型和相机名。`joints` 的数值是统一特征空间的宽度，应**大于等于**原始切片拼接后的维度（`arm.position` 原始为 12，这里给 14 留出对齐余量；`effector.position` 原始为 2，这里就是 2）。
+- `data.norm_stats_file` 必须指向真实存在的 JSON。
+- `train.action_dim` / `max_action_dim` / `max_state_dim` 由预训练模型的动作头决定，X-Trainer 沿用 `55`，不要为了 14 维数据而调小。
+- 训练和部署必须使用同一个 `config_key: LingbotVLAV2Config`，服务端会据此选择 Qwen3-VL 分支。
+
+批量大小由代码自动推导，无需手填：
+
+```text
+global_batch_size = micro_batch_size × data_parallel_size(GPU 数) × gradient_accumulation_steps
+dataloader_batch_size = global_batch_size / data_parallel_size
+```
+
+如果显式传入的 `global_batch_size` 与推导值不一致，训练会直接报错并给出期望值。`configs/vla/real_robot/real_robot.yaml` 是官方给出的真实机器人训练示例，补齐了 `end.position` 等其他关节类型和完整 `norm_type`，多关节平台应以它为参照。
+
+更多参数含义见 `docs/config/lingbotvla_config_doc.md` 和 `configs/vla/Training_Config.md`。
+
+## 9. 计算归一化统计
+
+训练前必须为数据集计算归一化统计，否则 `--data.norm_stats_file` 指向的文件不存在。
 
 单个数据集：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash train.sh scripts/compute_norm_stats.py \
-  ./configs/vla/norm_compute/post_data.yaml \
+  ./configs/vla/xtrainer/xtrainer.yaml \
   --data.data_name xtrainer \
   --data.train_path /path/to/lerobot_dataset \
   --data.robot_config_root ./configs/robot_configs \
@@ -41,109 +370,294 @@ CUDA_VISIBLE_DEVICES=0 bash train.sh scripts/compute_norm_stats.py \
   --data.data_ratio_for_norm_compute 1
 ```
 
-多个数据集需要创建数据清单，每行填写一个数据集：
+多个数据集：把 `--data.data_name` 设为 `multi`，`--data.train_path` 指向第 6.2 节的清单文件：
 
-```text
-xtrainer /path/to/lerobot_dataset_a
-xtrainer /path/to/lerobot_dataset_b
+```bash
+CUDA_VISIBLE_DEVICES=0 bash train.sh scripts/compute_norm_stats.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --data.data_name multi \
+  --data.train_path assets/training_data/xtrainer.txt \
+  --data.robot_config_root ./configs/robot_configs \
+  --data.norm_path assets/norm_stats/xtrainer.json \
+  --data.data_ratio_for_norm_compute 1
 ```
 
-然后将 `--data.data_name` 设为 `multi`，并通过 `--data.train_path` 传入该清单。
+相关参数：
 
-### 全参微调
+| 参数 | 说明 |
+|---|---|
+| `--data.train_path` | 单个数据集目录，或 `.txt` 清单文件（清单必须以 `.txt` 结尾）。 |
+| `--data.robot_name` | 可选。只在清单中筛选指定机器人配置名对应的条目。 |
+| `--data.norm_path` | 统计结果输出路径，应与机器人配置的 `norm_stats` 一致。 |
+| `--data.data_ratio_for_norm_compute` | 采样比例。`1` 表示用全量数据；小于 `1` 时按固定种子抽样。 |
+| `--data.norm_merge_chunk_dim` | 是否在统计 action 时合并 chunk 维度，默认 `true`。 |
+| `--train.micro_batch_size` | 统计过程的批大小。`configs/vla/norm_compute/post_data.yaml` 中预设为 `48`。 |
 
-全参训练配置位于 [`configs/vla/xtrainer/xtrainer.yaml`](configs/vla/xtrainer/xtrainer.yaml)。启动前需要填写模型、tokenizer、深度/视频教师、数据集和输出目录的实际路径。
+仓库同时提供了 `configs/vla/norm_compute/post_data.yaml` 作为专用统计配置（`data_name: multi`、`micro_batch_size: 48`），可以用它替代训练配置作为第一个参数。
+
+脚本对 state 与 action 分别统计 mean/std，action 会按照 `subtract_state` 的实际取值决定是否按 delta 统计。多卡时各 rank 先本地统计，再 `all_gather_object` 由 rank 0 合并写盘。
+
+生成后请确认输出 JSON 的路径与 `configs/robot_configs/xtrainer.yaml` 的 `norm_stats` 字段一致（当前仓库 `assets/norm_stats/` 中只有 `robotwin.json`，`xtrainer.json` 需要自己生成）。
+
+## 10. 全参微调
+
+### 10.1 启动命令
+
+配置文件作为第一个位置参数传入，且必须以 `.yaml` 结尾；其余参数用点号路径覆盖配置项：
 
 ```bash
 bash train.sh tasks/vla/train_lingbotvla.py \
-  ./configs/vla/xtrainer/xtrainer.yaml
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --data.data_name xtrainer \
+  --data.train_path /path/to/lerobot_dataset \
+  --data.robot_config_root ./configs/robot_configs \
+  --data.norm_stats_file assets/norm_stats/xtrainer.json \
+  --train.output_dir /path/to/save_ckpt
 ```
 
-脚本默认使用当前可见的全部 GPU。`global_batch_size` 会根据 GPU 进程数、`micro_batch_size` 和 `gradient_accumulation_steps` 自动计算。
+先用 `--train.max_steps` 设一个小值（例如 10）跑通链路，确认数据、显存和保存都正常，再放大到正式步数。短跑只验证管线，不代表模型已经学会任务。
 
-### LoRA
+### 10.2 `train.sh` 的行为
 
-训练配置和命令将在后续补充。
+`train.sh` 是一个 `torchrun` 封装：
 
-## 推理服务
+- 未设置 `CUDA_VISIBLE_DEVICES` 时用 `nvidia-smi -L` 的行数作为进程数；设置了则按逗号分隔的数量计算。
+- 支持 `NNODES`、`NODE_RANK`、`MASTER_ADDR`（默认 `0.0.0.0`）、`MASTER_PORT`（默认 `62500`）。
+- 强制离线 HF 环境变量。
+- 所有输出同时写入仓库根目录的 `log.txt`。
 
-仓库提供了与 X-Trainer Pi0.5-JAX `scripts/serve_policy.py` 类似的 WebSocket policy 服务入口：
+### 10.3 输出目录结构
+
+```text
+<output_dir>/
+├── lingbotvla_cli.yaml                    # save_args 写出的完整训练配置
+└── checkpoints/
+    └── global_step_40000/
+        ├── hf_ckpt/                       # *.safetensors，策略服务与评估使用
+        └── ...                            # dcp 分布式训练状态
+```
+
+`hf_ckpt` 目录是部署入口。服务端与开环评估都需要从 checkpoint 路径向上三级找到 `<output_dir>/lingbotvla_cli.yaml`，因此**不要把 `hf_ckpt` 单独拷走**，必须保持目录层级。
+
+## 11. 断点续训
+
+`train.enable_resume: true` 时，训练启动会扫描 `<output_dir>/checkpoints` 下形如 `global_step_<N>` 的目录并恢复最近的检查点：
+
+```bash
+bash train.sh tasks/vla/train_lingbotvla.py \
+  ./configs/vla/xtrainer/xtrainer.yaml \
+  --data.data_name xtrainer \
+  --data.train_path /path/to/lerobot_dataset \
+  --data.norm_stats_file assets/norm_stats/xtrainer.json \
+  --train.output_dir /path/to/save_ckpt \
+  --train.enable_resume true
+```
+
+如果目录里有多个检查点，会按 `global_step_<N>` 的数值从新到旧依次尝试加载。也可以显式指定：
+
+```bash
+--train.load_checkpoint_path /path/to/save_ckpt/checkpoints/global_step_20000
+```
+
+续训时以 checkpoint 中保存的模型、优化器、调度器和步数为准。更换数据集或任务后，应重新评估训练结果是否仍具备可比性。
+
+配置文件的首个位置参数除 `.yaml` / `.yml` 外也支持 `.json`；命令行传入的 `--group.field value` 优先级高于配置文件中的同名字段。
+
+## 12. 开环评估
+
+开环评估在不上机的前提下，逐轨迹比较预测动作与数据集真值，输出 MSE/MAE 和每个关节的曲线图。
+
+```bash
+python scripts/open_loop_eval.py \
+  --model_path /path/to/save_ckpt/checkpoints/global_step_40000/hf_ckpt \
+  --robo_name xtrainer \
+  --data_path /path/to/lerobot_dataset \
+  --traj_ids 0 1 2 \
+  --use_length 50 \
+  --save_plot_path ./open_loop_test/
+```
+
+参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--model_path` | 必填 | 含 `.safetensors` 的 checkpoint 目录。 |
+| `--robo_name` | 必填 | `configs/robot_configs` 下的机器人配置名。 |
+| `--norm_path` | 无 | 覆盖归一化统计文件路径。 |
+| `--data_path` | 无 | 验证数据路径；不填则用训练配置中的 `train_path`。 |
+| `--traj_ids` | `[0]` | 要评估的 episode 编号，可传多个。 |
+| `--use_length` | `50` | 每次推理取用的动作步数。 |
+| `--chunk_ret` | 自动 | 是否返回完整 action chunk；不填时根据训练配置的 `video_enabled` 自动决定。 |
+| `--max_infer_time` | `10` | 最大前向次数。步进模式下评估 `max_infer_time × use_length` 步。 |
+| `--num_denoising_step` | `10` | 去噪步数。 |
+| `--use_compile` | 关闭 | 启用 `torch.compile`。 |
+| `--use_bf16` | 关闭 | 使用 bfloat16 降低显存。 |
+| `--policy` | `auto` | `auto` / `qwen2` / `qwen3vl`。`auto` 时读取 `lingbotvla_cli.yaml` 判断。 |
+| `--video_debug_dir` | 无 | 保存采样的视频片段用于排查。 |
+| `--save_plot_path` | `./open_loop_test/` | 曲线图输出目录，文件名为 `<traj_id>.png`。 |
+
+X-Trainer 使用 Qwen3-VL 分支，`--policy auto` 会解析出 `qwen3vl`，与策略服务保持一致。
+
+## 13. 启动策略服务
 
 ```bash
 cd /path/to/X-Trainer-LingBot-VLA2.0
 
 python scripts/serve_policy.py \
-  --model-path /path/to/checkpoint \
-  --robot xtrainer \
-  --port 8000
-```
-
-服务启动时会加载 checkpoint，并根据 `configs/robot_configs/<robot>.yaml` 初始化机器人字段映射和归一化器。默认使用 `xtrainer` 配置，客户端不需要在第一次推理前额外发送 reset 请求。
-
-常用参数：
-
-
-| 参数           | 默认值           | 说明                                                       |
-| ---------------- | ------------------ | ------------------------------------------------------------ |
-| `--model-path` | 必填             | 包含`.safetensors` 权重的 checkpoint 目录                  |
-| `--robot`      | `xtrainer`       | `configs/robot_configs` 下的机器人配置名称，不包含 `.yaml` |
-| `--norm-path`  | 配置文件中的路径 | 覆盖 normalization statistics 文件路径                     |
-| `--host`       | `0.0.0.0`        | WebSocket 监听地址                                         |
-| `--port`       | `8000`           | WebSocket 监听端口                                         |
-| `--use-length` | `50`             | 每次模型前向后使用的动作数量                               |
-| `--step-mode`  | 关闭             | 每次请求仅返回一个动作；默认返回完整 action chunk          |
-| `--fp32`       | 关闭             | 使用 FP32；默认使用 BF16                                   |
-| `--compile`    | 关闭             | 使用`torch.compile` 加速推理                               |
-
-例如，启用 `torch.compile` 并返回 50 步 action chunk：
-
-```bash
-python scripts/serve_policy.py \
-  --model-path /path/to/checkpoint \
+  --model-path /path/to/save_ckpt/checkpoints/global_step_40000/hf_ckpt \
   --robot xtrainer \
   --use-length 50 \
-  --compile \
   --port 8000
 ```
 
-客户端可以使用仓库现有的 `WebsocketClientPolicy`：
+服务启动时会加载 checkpoint 和 `configs/robot_configs/<robot>.yaml`，初始化特征映射与归一化器，并按 metadata 中的 `robot` 完成一次 `reset`。**客户端不需要在第一次推理前额外发送 reset 请求。**
+
+参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--model-path` / `--model_path` | 必填 | 包含 `.safetensors` 的 checkpoint 目录。 |
+| `--robot` / `--robo-name` / `--robo_name` | `xtrainer` | `configs/robot_configs` 下的机器人配置名，不含 `.yaml`。 |
+| `--norm-path` / `--norm_path` | 无 | 覆盖归一化统计路径；不填则用训练配置的 `data.norm_stats_file`。 |
+| `--host` | `0.0.0.0` | WebSocket 监听地址。 |
+| `--port` | `8000` | WebSocket 监听端口。 |
+| `--use-length` / `--use_length` | `50` | 每次模型前向后使用的动作数量。 |
+| `--step-mode` | 关闭 | 每次请求仅返回一个动作；默认返回完整 action chunk。 |
+| `--fp32` | 关闭 | 使用 FP32；默认使用 BF16。 |
+| `--compile` | 关闭 | 使用 `torch.compile` 加速推理。 |
+
+启动后会向客户端发送 metadata：
+
+```json
+{"model_type": "lingbot-vla-2.0", "robot": "xtrainer"}
+```
+
+真机客户端会校验 `model_type` 与 `robot`，不匹配则拒绝运行。
+
+服务存活检查：
+
+```bash
+curl http://127.0.0.1:8000/healthz
+```
+
+客户端侧调用方式：
 
 ```python
 from deploy.websocket_client_policy import WebsocketClientPolicy
 
 policy = WebsocketClientPolicy(host="127.0.0.1", port=8000)
+metadata = policy.get_server_metadata()
 result = policy.infer(observation)
 ```
 
-仓库还提供了最小 Linux 真机客户端，它直接复用上述 WebSocket 客户端，并在本地消费 action chunk：
+`observation` 的字段必须与所选机器人 YAML 中的 `origin_keys` 对齐。对默认的 `xtrainer` 配置：
+
+- `observation.state`：形状 `(14,)`。
+- `observation.images.top` / `observation.images.left_wrist` / `observation.images.right_wrist`：RGB 图像。
+- `task`：自然语言任务描述。
+
+策略服务返回 `action`，形状为 `(H, 14)`，并附带 `server_timing` 字段。
+
+加载期间还需要满足的目录约束：
+
+- checkpoint 目录内包含一个或多个 `.safetensors` 文件。
+- checkpoint 路径向上三级存在训练时生成的 `lingbotvla_cli.yaml`。
+- Qwen3-VL 基础模型路径从训练配置的 `tokenizer_path` 读取，可用 `QWEN3VL_PATH` 环境变量覆盖。
+
+## 14. 启动真机任务
+
+### 14.1 启动命令
 
 ```bash
 python scripts/run_xtrainer_real.py \
   --host 192.168.1.10 \
-  --task "fold the clothes" \
+  --task "将桌面上的方块放入收纳盒" \
+  --action-horizon 25 \
+  --control-hz 20 \
+  --max-steps 200 \
   --camera-top-serial TOP_SERIAL \
   --camera-left-wrist-serial LEFT_WRIST_SERIAL \
   --camera-right-wrist-serial RIGHT_WRIST_SERIAL
 ```
 
-真机客户端要求服务端保持默认 chunk 模式，并且服务端 `--use-length` 不小于客户端 `--action-horizon`。硬件参数、独立依赖和首次真机测试步骤见 `deploy/xtrainer_real/README.md`。
+**安全提示：客户端没有 `--execute` 之类的二次确认开关。** 参数校验通过后程序会立即连接机械臂、复位并开始下发动作。上机前必须清空工作空间、确认急停可触达，并先用很小的 `--max-steps` 试跑。
 
-`observation` 的字段需要与所选机器人 YAML 中的 `origin_keys` 对齐。对于默认的 `xtrainer` 配置，输入包括：
+### 14.2 参数
 
-- `observation.state`：形状为 `(14,)` 的机器人状态。
-- `observation.images.top`：顶部相机 RGB 图像。
-- `observation.images.left_wrist`：左腕相机 RGB 图像。
-- `observation.images.right_wrist`：右腕相机 RGB 图像。
-- `task`：自然语言任务描述，具体字段处理以训练配置中的数据映射为准。
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--host` | 必填 | 策略服务的 IP 或主机名。 |
+| `--port` | `8000` | 必须与 `serve_policy.py` 的 `--port` 一致。 |
+| `--task` | `pick up the object` | 发送给模型的任务文本，应与训练数据中的任务描述一致。中文可直接传入。 |
+| `--action-horizon` | `25` | 每次策略响应最多执行的动作步数。 |
+| `--control-hz` | `20.0` | 动作下发频率。 |
+| `--max-steps` | `1000` | 整次任务最多执行的动作步总数。首次上机建议显著调小。 |
+| `--left-robot-ip` | `192.168.5.1` | 左臂 IP。 |
+| `--right-robot-ip` | `192.168.5.2` | 右臂 IP。 |
+| `--left-gripper-port` | `/dev/ttyUSB1` | 左夹爪串口。 |
+| `--right-gripper-port` | `/dev/ttyUSB0` | 右夹爪串口。 |
+| `--left-gripper-id` | `21` | 左夹爪舵机 ID。 |
+| `--right-gripper-id` | `22` | 右夹爪舵机 ID。 |
+| `--left-gripper-servo-pos` | `2048,3052` | 左夹爪行程 `MIN,MAX`。 |
+| `--right-gripper-servo-pos` | `2048,3052` | 右夹爪行程 `MIN,MAX`。 |
+| `--camera-top-serial` | 必填 | 顶部相机序列号。 |
+| `--camera-left-wrist-serial` | 必填 | 左腕相机序列号。 |
+| `--camera-right-wrist-serial` | 必填 | 右腕相机序列号。 |
+| `--camera-fps` | `30.0` | 相机帧率。 |
+| `--render-height` | `224` | 送入模型的图像高度。 |
+| `--render-width` | `224` | 送入模型的图像宽度。 |
+| `--max-joint-delta` | `0.17` | 单步关节变化上限（弧度）。超过时改用插值平滑过渡。 |
+| `--ramp-step` | `0.01` | 平滑插值的步长。 |
+| `--ramp-max-steps` | `100` | 平滑插值的最大步数。 |
+| `--gripper-update-threshold` | `0.02` | 夹爪目标的最小变化量，小于该值不发送。 |
+| `--servo-step-limit` | `0.9` | 底层舵机单步限幅。 |
 
-模型加载还需要满足以下目录约束：
+服务端的 `--use-length` 必须**不小于**客户端的 `--action-horizon`，并且不要向服务端传 `--step-mode`。
 
-- checkpoint 目录内包含一个或多个 `.safetensors` 文件。
-- checkpoint 路径向上三级的位置存在训练时生成的 `lingbotvla_cli.yaml`。
-- Qwen3-VL 基础模型路径可以从训练配置读取，也可以通过 `QWEN3VL_PATH` 环境变量覆盖。
+### 14.3 客户端行为
 
-服务启动后可通过以下接口检查进程是否存活：
+- `observation.state` 由左臂 7 维（6 关节 + 夹爪）与右臂 7 维拼接而成，与第 2.3 节顺序一致。
+- 三路图像会先 `resize_with_pad` 到 `render_height × render_width`，再转成 uint8。
+- 动作下发前会校验形状必须为 14 维且全部有限；两个夹爪目标会被裁剪到 `[0,1]`。
+- 关节变化超过 `--max-joint-delta` 时不会直接跳变，而是按 `--ramp-step` 插值过去。
+- 客户端只能拒绝格式错误、NaN 或 Inf 动作，**无法判断一个数值合法的动作对当前场景是否安全**。
 
-```bash
-curl http://127.0.0.1:8000/healthz
+## 15. 关键文件索引
+
+```text
+tools/create_train_env.sh                       # 训练环境构建
+download_base_models.sh / .ps1                  # 基础模型下载
+train.sh                                        # torchrun 封装
+tasks/vla/train_lingbotvla.py                   # 训练入口
+scripts/compute_norm_stats.py                   # 归一化统计
+scripts/open_loop_eval.py                       # 开环评估
+scripts/serve_policy.py                         # 策略服务
+scripts/run_xtrainer_real.py                    # 真机客户端
+scripts/download_hf_model.py                    # 通用模型下载
+scripts/download_hf_data.py                     # 通用数据集下载
+configs/robot_configs/xtrainer.yaml             # X-Trainer 特征映射
+configs/robot_configs/xtrainer_clothes.yaml     # X-Trainer 变体（独立统计量）
+configs/vla/xtrainer/xtrainer.yaml              # X-Trainer 训练配置
+configs/vla/norm_compute/post_data.yaml         # 专用统计配置
+configs/vla/real_robot/real_robot.yaml          # 官方真实机器人训练示例
+deploy/lingbot_vla_v2_policy.py                 # 策略封装
+deploy/websocket_policy_server.py               # WebSocket 服务端
+deploy/websocket_client_policy.py               # WebSocket 客户端
+deploy/xtrainer_real/README.md                  # 真机客户端说明
+deploy/xtrainer_real/environment.py             # 真机环境
+deploy/xtrainer_real/hardware/                  # Dobot 与 RealSense 封装
+lingbotvla/data/vla_data/README.md              # 数据准备与机器人配置详解
+docs/config/lingbotvla_config_doc.md            # 训练参数说明
+configs/vla/Training_Config.md                  # 训练配置示例与批大小规则
 ```
+
+## 16. 已知限制与注意事项
+
+1. **LoRA 暂未提供训练入口。** `lingbotvla/utils/lora_utils.py` 只是一个工具模块，仓库内没有对应的训练脚本或配置。需要 LoRA 微调时应先补齐入口，不要直接套用全参训练命令。
+2. **训练脚本强制离线。** `train.sh` 导出的 `HF_*_OFFLINE=1` 会让所有在线拉取失败，模型与数据必须提前下载。
+3. **`compute_norm_stats.py` 使用 `fork` 启动多进程**，仅适用于 Linux。Windows 上仅能运行部署侧（服务端/客户端）代码。
+4. **真机客户端没有二次确认开关**，启动即连接并运动，务必先小步数试跑。
+5. **`assets/norm_stats/` 中没有 `xtrainer.json`**，训练前必须自己生成。
+6. **不要单独拷贝 `hf_ckpt` 目录**，服务端和评估都依赖向上三级能找到的 `lingbotvla_cli.yaml`。
+7. `configs/vla/xtrainer/xtrainer.yaml` 中的 `model_path`、`tokenizer_path`、`data.train_path`、`train.output_dir` 以及深度/视频教师路径都是占位值，训练前必须逐个确认。
+8. 训练与部署必须使用同一份 `configs/robot_configs/xtrainer.yaml` 和同一份归一化统计，否则动作量纲会不一致。
