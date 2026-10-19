@@ -9,8 +9,41 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from deploy.image_codec import JPEG_RGB_ENCODING
 from deploy.lingbot_vla_v2_policy import LingbotVLAv2Server
+from deploy.inference_logging import InferenceRecorder
 from deploy.websocket_policy_server import WebsocketPolicyServer
+
+
+XTRAINER_RESET_POSE = (
+    -1.57,
+    0.0,
+    -1.57,
+    0.0,
+    1.57,
+    1.57,
+    1.0,
+    1.57,
+    0.0,
+    1.57,
+    0.0,
+    -1.57,
+    -1.57,
+    1.0,
+)
+
+
+def _build_server_metadata(robot: str) -> dict:
+    metadata = {
+        "model_type": "lingbot-vla-2.0",
+        "robot": robot,
+        # The client only JPEG-encodes camera frames when the server advertises
+        # support; older servers keep receiving raw ndarrays.
+        "image_encodings": ["raw_ndarray", JPEG_RGB_ENCODING],
+    }
+    if robot == "xtrainer":
+        metadata["reset_pose"] = list(XTRAINER_RESET_POSE)
+    return metadata
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,12 +62,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000, help="WebSocket listen port")
     parser.add_argument("--use-length", "--use_length", type=int, default=50, help="Actions consumed per model call")
     parser.add_argument(
+        "--num-steps",
+        "--num_steps",
+        type=int,
+        default=10,
+        help="Flow-matching denoising steps per action chunk (10 = training default; "
+        "4-6 cuts inference latency ~2-3x with minor quality loss)",
+    )
+    parser.add_argument(
         "--step-mode",
         action="store_true",
         help="Return one action per request instead of the full action chunk",
     )
     parser.add_argument("--fp32", action="store_true", help="Use float32 instead of bfloat16")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile for inference")
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Skip the throwaway warmup inference that keeps the first action chunk off the cold-start path",
+    )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Write raw policy requests, responses, and input PNGs under ./log",
+    )
     return parser.parse_args()
 
 
@@ -56,19 +107,28 @@ def main() -> None:
         use_bf16=not args.fp32,
         use_fp32=args.fp32,
         use_compile=args.compile,
+        num_steps=args.num_steps,
     )
     policy.reset(args.robot)
+    if not args.no_warmup:
+        policy.warmup(args.robot)
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s, port: %d)", hostname, local_ip, args.port)
+    recorder = InferenceRecorder("server") if args.log else None
     server = WebsocketPolicyServer(
         policy=policy,
         host=args.host,
         port=args.port,
-        metadata={"model_type": "lingbot-vla-2.0", "robot": args.robot},
+        metadata=_build_server_metadata(args.robot),
+        inference_callback=recorder.record_inference if recorder is not None else None,
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

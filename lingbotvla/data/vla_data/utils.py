@@ -450,7 +450,7 @@ class FeatureTransform:
         batch_dict["image_token_count"] = image_token_count
         
         lang_tokens, lang_masks = prepare_language(self.model_config, self.tokenizer, batch_dict) # bs, seq_len
-        action_is_pad = batch_dict['action_is_pad']
+        action_is_pad = torch.as_tensor(batch_dict['action_is_pad'], dtype=torch.bool)
 
         state_joint_mask = batch_dict['state_joint_mask']
         assert self.model_config.max_state_dim >= state_joint_mask.shape[-1], f"max_action_dim is smaller than the state joint dimension: {self.model_config.max_action_dim} < {state_joint_mask.shape[-1]}"
@@ -463,6 +463,11 @@ class FeatureTransform:
         chunk_joint_mask = batch_dict['chunk_joint_mask']
         assert self.model_config.max_action_dim >= chunk_joint_mask.shape[-1], f"max_action_dim is smaller than the action joint dimension: {self.model_config.max_action_dim} < {chunk_joint_mask.shape[-1]}"
         chunk_joint_mask = F.pad(chunk_joint_mask, (0, self.model_config.max_action_dim - chunk_joint_mask.shape[-1])).to(dtype=torch.bool)
+        assert action_is_pad.shape == chunk_joint_mask.shape[:-1], (
+            f"action_is_pad shape {action_is_pad.shape} does not match action chunk shape "
+            f"{chunk_joint_mask.shape[:-1]}"
+        )
+        chunk_joint_mask = chunk_joint_mask & ~action_is_pad.unsqueeze(-1)
         
         del batch_dict
         batch_dict = {

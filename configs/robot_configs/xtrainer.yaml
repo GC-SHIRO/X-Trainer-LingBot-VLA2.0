@@ -27,6 +27,7 @@ actions:
             start: 7
             end: 13
       subtract_state: true
+      relative_type: joint
 
   - action.effector.position:
       origin_keys:

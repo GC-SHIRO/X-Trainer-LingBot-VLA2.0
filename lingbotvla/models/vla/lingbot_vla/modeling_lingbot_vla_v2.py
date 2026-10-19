@@ -1257,6 +1257,20 @@ class LingbotVlaV2Policy(PreTrainedModel):
         if getattr(self.config, "action_fp32", False):
             state = state.float()
             actions = actions.float()
+        else:
+            # The action-side projections run in their parameter dtype. The raw
+            # dataset tensors are float32, so they must be aligned here:
+            #   * multi-GPU FSDP2 installs MixedPrecisionPolicy(param_dtype=bfloat16)
+            #     and casts forward inputs itself (cast_forward_inputs defaults to
+            #     True), so this is a no-op;
+            #   * a plain BF16 load (enable_mixed_precision=False at world size 1)
+            #     has no mp_policy at all, and without this cast `state_proj`
+            #     receives float32 against bfloat16 weights.
+            # Mirrors deploy/lingbot_vla_v2_policy.py, which does the same cast
+            # for the inference path.
+            param_dtype = self.model.state_proj.weight.dtype
+            state = state.to(param_dtype)
+            actions = actions.to(param_dtype)
         (
             losses,
             loss_depth,

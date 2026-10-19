@@ -1,10 +1,11 @@
 import logging
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from typing_extensions import override
 import websockets.sync.client
+from .image_codec import JPEG_RGB_ENCODING, encode_policy_images
 from .msgpack_numpy import Packer, unpackb
 
 
@@ -14,13 +15,40 @@ class WebsocketClientPolicy:
     See WebsocketPolicyServer for a corresponding server implementation.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: Optional[int] = None,
+        api_key: Optional[str] = None,
+        inference_callback: Optional[Callable[[Dict, Dict], None]] = None,
+        image_jpeg_quality: int = 85,
+    ) -> None:
+        if not 0 <= image_jpeg_quality <= 100:
+            raise ValueError("image_jpeg_quality must be in [0, 100]")
         self._uri = f"ws://{host}"
         if port is not None:
             self._uri += f":{port}"
         self._packer = Packer()
         self._api_key = api_key
+        self._inference_callback = inference_callback
         self._ws, self._server_metadata = self._wait_for_server()
+        self._image_jpeg_quality = self._negotiate_image_quality(image_jpeg_quality)
+
+    def _negotiate_image_quality(self, requested: int) -> int:
+        """Keep JPEG encoding only when the server advertised support for it."""
+        if requested <= 0:
+            logging.info("Camera observations are sent as raw ndarrays (JPEG encoding disabled)")
+            return 0
+        supported = self._server_metadata.get("image_encodings") or []
+        if JPEG_RGB_ENCODING not in supported:
+            logging.warning(
+                "Server does not advertise %s image support (advertised: %s); sending raw ndarrays",
+                JPEG_RGB_ENCODING,
+                list(supported),
+            )
+            return 0
+        logging.info("Camera observations are sent as JPEG (quality %d)", requested)
+        return requested
 
     def get_server_metadata(self) -> Dict:
         return self._server_metadata
@@ -48,16 +76,30 @@ class WebsocketClientPolicy:
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        data = self._packer.pack(obs)
+        payload = obs
+        if self._image_jpeg_quality > 0:
+            payload = encode_policy_images(obs, self._image_jpeg_quality)
+        data = self._packer.pack(payload)
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
             # we're expecting bytes; if the server sends a string, it's an error.
             raise RuntimeError(f"Error in inference server:\n{response}")
-        return unpackb(response)
+        result = unpackb(response)
+        if self._inference_callback is not None:
+            try:
+                self._inference_callback(obs, result)
+            except Exception:
+                logging.exception("Inference callback failed; continuing without interrupting control")
+        return result
 
     @override
     def reset(self, robo_name: str) -> None:
+        """Clear server-side episode state (action cache, step counter, transforms).
+
+        Called once at the start of every run so a long-lived policy server
+        cannot carry state over from the previous episode.
+        """
         self.infer(dict(reset=True, robo_name=robo_name))
 
     def close(self) -> None:

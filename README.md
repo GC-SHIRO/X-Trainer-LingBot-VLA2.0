@@ -444,6 +444,8 @@ bash train.sh tasks/vla/train_lingbotvla.py \
 `train.enable_resume: true` 时，训练启动会扫描 `<output_dir>/checkpoints` 下形如 `global_step_<N>` 的目录并恢复最近的检查点：
 
 ```bash
+NNODES=2 NODE_RANK=<0-or-1> MASTER_ADDR=<rank0-ip> MASTER_PORT=62500 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 bash train.sh tasks/vla/train_lingbotvla.py \
   ./configs/vla/xtrainer/xtrainer.yaml \
   --data.data_name xtrainer \
@@ -501,8 +503,28 @@ X-Trainer 使用 Qwen3-VL 分支，`--policy auto` 会解析出 `qwen3vl`，与�
 ## 13. 启动策略服务
 
 ```bash
-cd /path/to/X-Trainer-LingBot-VLA2.0
+python scripts/open_loop_eval.py \
+  --model_path /path/to/checkpoint \
+  --robo_name xtrainer \
+  --norm_path assets/norm_stats/xtrainer.json \
+  --data_path /path/to/lerobot_validation_dataset \
+  --traj_ids 0 1 2 \
+  --use_length 50 \
+  --max_infer_time 10 \
+  --use_bf16 \
+  --save_plot_path ./open_loop_test
+```
 
+离线 MSE/MAE 只能用于排查数据和 checkpoint，不等价于真实任务成功率。
+
+---
+
+## 12. Policy Server
+
+### 12.1 启动
+
+```bash
+QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct \
 python scripts/serve_policy.py \
   --model-path /path/to/save_ckpt/checkpoints/global_step_40000/hf_ckpt \
   --robot xtrainer \
@@ -569,6 +591,10 @@ result = policy.infer(observation)
 ### 14.1 启动命令
 
 ```bash
+# 终端 1
+python scripts/serve_mock_policy.py --host 127.0.0.1 --port 8000 --horizon 50
+
+# 终端 2
 python scripts/run_xtrainer_real.py \
   --host 192.168.1.10 \
   --task "将桌面上的方块放入收纳盒" \

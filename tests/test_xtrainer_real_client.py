@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import sys
 import types
 import unittest
@@ -21,6 +22,27 @@ def _load_client_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _parse_default_args(client):
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        sys,
+        "argv",
+        [
+            "run_xtrainer_real.py",
+            "--host",
+            "127.0.0.1",
+            "--camera-top-serial",
+            "top",
+            "--camera-left-wrist-serial",
+            "left",
+            "--camera-right-wrist-serial",
+            "right",
+        ],
+    ):
+        return client.parse_args()
 
 
 class ActionChunkTest(unittest.TestCase):
@@ -49,6 +71,177 @@ class ActionChunkTest(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             self.client._extract_action_chunk({}, 25)
+
+    def test_rate_limits_action_delta(self) -> None:
+        last_action = np.zeros(14)
+        action = np.ones(14)
+
+        limited = self.client._rate_limit_action(action, last_action, 0.25)
+
+        np.testing.assert_allclose(limited, np.full(14, 0.25))
+
+
+class CliTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _load_client_module()
+
+    def test_cli_defaults_execute_full_chunk_without_execution_limits(self) -> None:
+        args = _parse_default_args(self.client)
+
+        self.assertEqual(args.action_horizon, 50)
+        self.assertEqual(args.control_hz, 30.0)
+        self.assertEqual(args.chunk_blend_steps, 6)
+        self.assertEqual(args.image_jpeg_quality, 85)
+        self.assertFalse(args.log)
+        self.assertTrue(math.isinf(args.max_joint_delta))
+        self.assertEqual(args.gripper_update_threshold, 0.0)
+        self.assertTrue(math.isinf(args.servo_step_limit))
+
+    def test_no_prefetch_options_remain(self) -> None:
+        args = _parse_default_args(self.client)
+
+        stale = [name for name in vars(args) if "prefetch" in name or "switch" in name]
+        self.assertEqual(stale, [])
+        self.assertFalse(hasattr(self.client, "_align_prefetched_chunk"))
+        self.assertFalse(hasattr(self.client, "_apply_prefetched_chunk"))
+        self.assertFalse(hasattr(self.client, "_infer_prefetch_chunk"))
+
+
+class ChunkBlendTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _load_client_module()
+
+    def test_blend_offset_is_last_sent_minus_first_action(self) -> None:
+        offset = self.client._chunk_blend_offset(np.full(14, 0.5), np.full(14, 0.1))
+
+        np.testing.assert_allclose(offset, np.full(14, 0.4))
+
+    def test_blend_offset_is_none_on_first_chunk(self) -> None:
+        self.assertIsNone(self.client._chunk_blend_offset(None, np.zeros(14)))
+
+    def test_blend_starts_near_the_previous_action_and_lands_on_target(self) -> None:
+        action = np.zeros(14)
+        offset = np.ones(14)
+
+        first = self.client._blend_chunk_action(action, offset, 0, 6)
+        last = self.client._blend_chunk_action(action, offset, 5, 6)
+
+        # smoothstep(1/6) == 0.074074..., so the first step keeps ~92.6% of the splice offset
+        np.testing.assert_allclose(first[:6], np.full(6, 1.0 - 0.07407407407407407), rtol=1e-9)
+        np.testing.assert_allclose(first[7:13], np.full(6, 1.0 - 0.07407407407407407), rtol=1e-9)
+        # the last blended step is exactly the model target
+        np.testing.assert_allclose(last, action)
+
+    def test_blend_stops_after_blend_steps(self) -> None:
+        action = np.zeros(14)
+        offset = np.ones(14)
+
+        beyond = self.client._blend_chunk_action(action, offset, 6, 6)
+
+        np.testing.assert_allclose(beyond, action)
+
+    def test_blend_is_monotonic_toward_the_target(self) -> None:
+        action = np.zeros(14)
+        offset = np.ones(14)
+
+        residuals = [self.client._blend_chunk_action(action, offset, index, 6)[0] for index in range(6)]
+
+        self.assertEqual(residuals, sorted(residuals, reverse=True))
+
+    def test_blend_never_touches_grippers(self) -> None:
+        action = np.zeros(14)
+        action[6] = action[13] = 0.25
+        offset = np.ones(14)
+
+        blended = self.client._blend_chunk_action(action, offset, 0, 6)
+
+        self.assertEqual(blended[6], 0.25)
+        self.assertEqual(blended[13], 0.25)
+
+    def test_blend_disabled_when_steps_below_two(self) -> None:
+        action = np.arange(14, dtype=np.float64)
+        offset = np.ones(14)
+
+        for blend_steps in (0, 1):
+            with self.subTest(blend_steps=blend_steps):
+                np.testing.assert_allclose(
+                    self.client._blend_chunk_action(action, offset, 0, blend_steps), action
+                )
+
+    def test_blend_without_offset_returns_action(self) -> None:
+        action = np.arange(14, dtype=np.float64)
+
+        np.testing.assert_allclose(self.client._blend_chunk_action(action, None, 0, 6), action)
+
+
+class HoldActionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _load_client_module()
+
+    def test_holds_measured_joints_and_preserves_gripper_targets(self) -> None:
+        state = np.arange(14, dtype=np.float32)
+        state[[6, 13]] = [0.4, 0.6]
+        previous = np.full(14, -1.0)
+        previous[[6, 13]] = [0.0, 1.0]
+
+        hold = self.client._hold_action_from_observation({"observation.state": state}, previous)
+
+        self.assertEqual(hold.dtype, np.float64)
+        joints = np.r_[0:6, 7:13]
+        np.testing.assert_allclose(hold[joints], state[joints])
+        np.testing.assert_allclose(hold[[6, 13]], [0.0, 1.0])
+        np.testing.assert_allclose(state[[6, 13]], [0.4, 0.6])
+
+    def test_returns_a_copy_so_the_observation_is_not_aliased(self) -> None:
+        # float64 so that the dtype conversion cannot be what makes the copy.
+        state = np.zeros(14, dtype=np.float64)
+        observation = {"observation.state": state}
+        previous = np.ones(14, dtype=np.float64)
+
+        hold = self.client._hold_action_from_observation(observation, previous)
+        hold[0] = 5.0
+        hold[6] = 0.5
+
+        np.testing.assert_array_equal(state, np.zeros(14))
+        np.testing.assert_array_equal(previous, np.ones(14))
+
+    def test_rejects_wrong_length_and_non_finite_state(self) -> None:
+        for state in (np.zeros(13), np.zeros(15), np.full(14, np.nan), np.full(14, np.inf)):
+            with self.subTest(state=state):
+                with self.assertRaises(ValueError):
+                    self.client._hold_action_from_observation({"observation.state": state}, np.zeros(14))
+
+    def test_rejects_invalid_previous_action(self) -> None:
+        for previous in (np.zeros(13), np.zeros(15), np.full(14, np.nan), np.full(14, np.inf)):
+            with self.subTest(previous=previous):
+                with self.assertRaises(ValueError):
+                    self.client._hold_action_from_observation({"observation.state": np.zeros(14)}, previous)
+
+    def test_rejects_missing_state(self) -> None:
+        with self.assertRaises(KeyError):
+            self.client._hold_action_from_observation({"task": "test"}, np.zeros(14))
+
+
+class ServerTimingTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _load_client_module()
+
+    def test_logs_server_timing_without_raising(self) -> None:
+        with self.assertLogs(level="INFO") as captured:
+            self.client._log_server_timing({"server_timing": {"infer_ms": 12.5, "prev_total_ms": 40.0}})
+
+        self.assertIn("infer=12.5 ms", captured.output[0])
+
+    def test_tolerates_first_response_without_previous_total(self) -> None:
+        with self.assertLogs(level="INFO"):
+            self.client._log_server_timing({"server_timing": {"infer_ms": 12.5}})
+
+    def test_ignores_responses_without_timing(self) -> None:
+        self.client._log_server_timing({"action": np.zeros((2, 14))})
 
 
 if __name__ == "__main__":

@@ -210,7 +210,8 @@ class VLADataset(Dataset):
             repo_id=repo_id,
             image_transforms=Resize(image_size),
             delta_timestamps=merged_delta,
-            load_image=load_image
+            load_image=load_image,
+            video_backend=video_backend,
         )
 
         self.return_item = return_item

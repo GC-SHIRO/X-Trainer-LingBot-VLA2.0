@@ -939,8 +939,11 @@ def parse_args(rootclass: T) -> T:
     for base, arg_dict in input_data.items():
         for arg_name, arg_value in arg_dict.items():
             if f"--{base}.{arg_name}=" not in cmd_args_string:  # lower priority
-                # Skip list fields with None values to use default
-                if f"{base}.{arg_name}" in list_fields and arg_value is None:
+                # Skip None values so the dataclass default applies. Serializing None
+                # would inject the literal string "null", which fails type conversion
+                # for numeric fields (e.g. `num_train_epochs: null` -> int("null"))
+                # and silently becomes the string "null" for str/Optional[str] fields.
+                if arg_value is None:
                     continue
 
                 cmd_args.append(f"--{base}.{arg_name}")
