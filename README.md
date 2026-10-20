@@ -600,11 +600,11 @@ python scripts/run_xtrainer_real.py \
   --task "将桌面上的方块放入收纳盒" \
   --action-horizon 25 \
   --control-hz 20 \
-  --max-steps 200 \
-  --camera-top-serial TOP_SERIAL \
-  --camera-left-wrist-serial LEFT_WRIST_SERIAL \
-  --camera-right-wrist-serial RIGHT_WRIST_SERIAL
+  --max-steps 200
 ```
+
+默认使用本机 X-Trainer 的三路相机序列号；若机器人接线不同，可通过三个
+`--camera-*-serial` 参数覆盖。
 
 **安全提示：客户端没有 `--execute` 之类的二次确认开关。** 参数校验通过后程序会立即连接机械臂、复位并开始下发动作。上机前必须清空工作空间、确认急停可触达，并先用很小的 `--max-steps` 试跑。
 
@@ -626,9 +626,9 @@ python scripts/run_xtrainer_real.py \
 | `--right-gripper-id` | `22` | 右夹爪舵机 ID。 |
 | `--left-gripper-servo-pos` | `2048,3052` | 左夹爪行程 `MIN,MAX`。 |
 | `--right-gripper-servo-pos` | `2048,3052` | 右夹爪行程 `MIN,MAX`。 |
-| `--camera-top-serial` | 必填 | 顶部相机序列号。 |
-| `--camera-left-wrist-serial` | 必填 | 左腕相机序列号。 |
-| `--camera-right-wrist-serial` | 必填 | 右腕相机序列号。 |
+| `--camera-top-serial` | `409122273405` | 顶部相机序列号；可按现场硬件覆盖。 |
+| `--camera-left-wrist-serial` | `412622272997` | 左腕相机序列号；可按现场硬件覆盖。 |
+| `--camera-right-wrist-serial` | `412622271417` | 右腕相机序列号；可按现场硬件覆盖。 |
 | `--camera-fps` | `30.0` | 相机帧率。 |
 | `--render-height` | `224` | 送入模型的图像高度。 |
 | `--render-width` | `224` | 送入模型的图像宽度。 |

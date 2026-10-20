@@ -17,6 +17,12 @@ from deploy.xtrainer_real import XTrainerRealEnvironment
 
 JOINT_INDICES = np.r_[0:6, 7:13]
 
+# Keep these aligned with the X-Trainer camera wiring used by XVLA.  They can
+# still be overridden from the command line for a different robot setup.
+TOP_CAMERA_SERIAL = "409122273405"
+LEFT_WRIST_CAMERA_SERIAL = "412622272997"
+RIGHT_WRIST_CAMERA_SERIAL = "412622271417"
+
 
 def _servo_range(value: str) -> tuple[int, int]:
     try:
@@ -130,9 +136,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--right-gripper-id", type=int, default=22)
     parser.add_argument("--left-gripper-servo-pos", type=_servo_range, default=(2048, 3052), metavar="MIN,MAX")
     parser.add_argument("--right-gripper-servo-pos", type=_servo_range, default=(2048, 3052), metavar="MIN,MAX")
-    parser.add_argument("--camera-top-serial", required=True)
-    parser.add_argument("--camera-left-wrist-serial", required=True)
-    parser.add_argument("--camera-right-wrist-serial", required=True)
+    parser.add_argument("--camera-top-serial", default=TOP_CAMERA_SERIAL)
+    parser.add_argument("--camera-left-wrist-serial", default=LEFT_WRIST_CAMERA_SERIAL)
+    parser.add_argument("--camera-right-wrist-serial", default=RIGHT_WRIST_CAMERA_SERIAL)
     parser.add_argument("--camera-fps", type=float, default=30.0)
     parser.add_argument(
         "--max-joint-delta",

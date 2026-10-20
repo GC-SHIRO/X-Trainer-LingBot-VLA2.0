@@ -45,6 +45,13 @@ def _parse_default_args(client):
         return client.parse_args()
 
 
+def _parse_args_without_camera_serials(client):
+    import unittest.mock
+
+    with unittest.mock.patch.object(sys, "argv", ["run_xtrainer_real.py", "--host", "127.0.0.1"]):
+        return client.parse_args()
+
+
 class ActionChunkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -97,6 +104,13 @@ class CliTest(unittest.TestCase):
         self.assertTrue(math.isinf(args.max_joint_delta))
         self.assertEqual(args.gripper_update_threshold, 0.0)
         self.assertTrue(math.isinf(args.servo_step_limit))
+
+    def test_camera_serials_default_to_xtrainer_wiring(self) -> None:
+        args = _parse_args_without_camera_serials(self.client)
+
+        self.assertEqual(args.camera_top_serial, self.client.TOP_CAMERA_SERIAL)
+        self.assertEqual(args.camera_left_wrist_serial, self.client.LEFT_WRIST_CAMERA_SERIAL)
+        self.assertEqual(args.camera_right_wrist_serial, self.client.RIGHT_WRIST_CAMERA_SERIAL)
 
     def test_no_prefetch_options_remain(self) -> None:
         args = _parse_default_args(self.client)
