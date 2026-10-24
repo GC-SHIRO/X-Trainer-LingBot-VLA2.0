@@ -8,18 +8,18 @@
 
 ## 1. 文档目标
 
-本文用于在 Dobot X-Trainer 双臂平台上完成 LingBot-VLA 2.0 的基础模型准备、后训练（全参微调）、开环评估和真机部署。
+本文用于在 Dobot X-Trainer 双臂平台上完成 LingBot-VLA 2.0 的基础模型准备、后训练（全参微调或冻结 VLM 微调）和真机部署。
 
 主流程：
 
 ```text
 基础模型下载 -> 训练环境部署 -> raw 示教数据转换为 LeRobot v3.0 -> 机器人配置映射
--> 计算归一化统计 -> 全参微调 -> 开环评估 -> 策略服务 -> 真机执行
+-> 计算归一化统计 -> 模型微调 -> 策略服务 -> 真机执行
 ```
 
 本文所有命令默认在仓库根目录、Linux/Bash 环境下执行，路径请替换为实际值。
 
-**本仓库不包含数据采集代码。** X-Trainer 的遥操作采集流程请参考同目录的 `X-Trainer-XVLA` 手册第 5 至第 7 节。拿到 raw 原始记录后，使用本仓库的 `tools/convert_raw_to_lerobot_3.py` 转换为 LeRobot v3.0，具体命令见第 6 节。
+**本仓库不包含数据采集代码。** 准备好 X-Trainer 的 raw 原始示教记录后，使用本仓库的 `tools/convert_raw_to_lerobot_3.py` 转换为 LeRobot v3.0，具体命令见第 6 节。
 
 ## 2. 总体架构
 
@@ -32,13 +32,11 @@ X-Trainer raw 示教数据（collect_data/<episode_id>/）
     -> configs/robot_configs/xtrainer.yaml        特征映射
     -> scripts/compute_norm_stats.py              归一化统计
     -> assets/norm_stats/xtrainer.json
-    -> tasks/vla/train_lingbotvla.py              全参微调
+    -> tasks/vla/train_lingbotvla.py              全参微调或冻结 VLM 微调
     -> <output_dir>/checkpoints/global_step_N/hf_ckpt
     -> scripts/serve_policy.py                    WebSocket 策略服务
     -> scripts/run_xtrainer_real.py               真机客户端
 ```
-
-开环评估（`scripts/open_loop_eval.py`）位于微调和真机部署之间，用于在不上机的前提下比较预测动作与数据集真值。
 
 ### 2.2 项目分工
 
@@ -47,7 +45,6 @@ X-Trainer raw 示教数据（collect_data/<episode_id>/）
 | 训练入口 | `tasks/vla/train_lingbotvla.py` | LingBot-VLA 2.0 后训练主程序。 |
 | 分布式启动 | `train.sh` | `torchrun` 封装，自动探测可见 GPU 数并写 `log.txt`。 |
 | 归一化统计 | `scripts/compute_norm_stats.py` | 统计 state/action 的 mean/std，生成 JSON。 |
-| 开环评估 | `scripts/open_loop_eval.py` | 单轨迹动作对比，输出 MSE/MAE 与曲线图。 |
 | 数据转换 | `tools/convert_raw_to_lerobot_3.py` | raw 原始记录转 LeRobot v3.0，三路相机对齐、坏帧过滤。 |
 | 数据加载 | `lingbotvla/data/vla_data/` | LeRobot v3.0 加载、多数据集拼接、特征映射。 |
 | 机器人配置 | `configs/robot_configs/*.yaml` | raw 特征名到统一特征空间的映射。 |
@@ -455,9 +452,9 @@ CUDA_VISIBLE_DEVICES=0 bash train.sh scripts/compute_norm_stats.py \
 
 生成后请确认输出 JSON 的路径与 `configs/robot_configs/xtrainer.yaml` 的 `norm_stats` 字段一致（当前仓库 `assets/norm_stats/` 中只有 `robotwin.json`，`xtrainer.json` 需要自己生成）。
 
-## 10. 全参微调
+## 10. 模型微调
 
-### 10.1 启动命令
+### 10.1 全参微调启动命令
 
 配置文件作为第一个位置参数传入，且必须以 `.yaml` 结尾；其余参数用点号路径覆盖配置项：
 
@@ -489,11 +486,31 @@ bash train.sh tasks/vla/train_lingbotvla.py \
 ├── lingbotvla_cli.yaml                    # save_args 写出的完整训练配置
 └── checkpoints/
     └── global_step_40000/
-        ├── hf_ckpt/                       # *.safetensors，策略服务与评估使用
+        ├── hf_ckpt/                       # *.safetensors，策略服务使用
         └── ...                            # dcp 分布式训练状态
 ```
 
-`hf_ckpt` 目录是部署入口。服务端与开环评估都需要从 checkpoint 路径向上三级找到 `<output_dir>/lingbotvla_cli.yaml`，因此**不要把 `hf_ckpt` 单独拷走**，必须保持目录层级。
+`hf_ckpt` 目录是部署入口。服务端需要从 checkpoint 路径向上三级找到 `<output_dir>/lingbotvla_cli.yaml`，因此**不要把 `hf_ckpt` 单独拷走**，必须保持目录层级。
+
+### 10.4 冻结 VLM 微调及注意事项
+
+冻结 VLM 时，视觉编码器和语言模型保持预训练权重，继续训练动作专家及其余未冻结模块。使用相同的训练入口，在第 10.1 节命令中增加以下覆盖项，并将 `--train.output_dir` 改为新的输出目录：
+
+```bash
+--train.freeze_vision_encoder true \
+--train.train_expert_only true \
+--train.train_state_proj true \
+--train.enable_resume false
+```
+
+也可以在 YAML 的 `train` 节点中设置这四个字段。当前 X-Trainer 配置的 `freeze_vision_encoder` 为 `false`，`train_expert_only` 默认也是 `false`，需要显式开启。
+
+- **冻结视觉编码器与冻结整个 VLM 不同。** 仅设置 `freeze_vision_encoder: true` 时，语言模型仍参与训练；冻结整个 VLM 应同时设置 `train_expert_only: true`。不要仅用 `freeze_vit` 代替这两个开关。
+- **`train_expert_only` 不表示只更新动作专家。** `train_state_proj` 默认是 `true`，状态投影层仍参与训练；动作侧投影层和已启用的深度/视频对齐模块等也不会被这两个开关自动冻结。如需冻结状态投影层，可额外设置 `train_state_proj: false`。
+- **切换训练方式时使用新输出目录。** 从全参微调切换到冻结 VLM 微调时，不要直接恢复原运行的优化器状态，可通过 `model.model_path` 指定已有 `hf_ckpt` 作为权重起点。上述命令关闭自动续训；如配置中设置了 `train.load_checkpoint_path`，也应清除。后续对同一次冻结 VLM 训练续训时，保持冻结配置一致，再开启 `enable_resume`。
+- **冻结不会关闭辅助损失。** `align_params` 中已启用的深度/视频教师和损失仍会执行，教师权重与未来帧数据仍须准备齐全。是否调整辅助损失应单独评估。
+- **冻结后仍需加载 VLM 并执行前向计算。** 不应据此假定可以移除基础模型，或显存和耗时必然按可训练参数比例下降。先进行少量步数试跑，确认损失、显存和 checkpoint 保存正常，再开展正式训练。
+- **数据与部署契约保持一致。** 仍需计算并使用匹配的归一化统计，保持机器人特征映射、动作维度和 checkpoint 目录层级一致。
 
 ## 11. 断点续训
 
@@ -521,61 +538,7 @@ bash train.sh tasks/vla/train_lingbotvla.py \
 
 配置文件的首个位置参数除 `.yaml` / `.yml` 外也支持 `.json`；命令行传入的 `--group.field value` 优先级高于配置文件中的同名字段。
 
-## 12. 开环评估
-
-开环评估在不上机的前提下，逐轨迹比较预测动作与数据集真值，输出 MSE/MAE 和每个关节的曲线图。
-
-```bash
-python scripts/open_loop_eval.py \
-  --model_path /path/to/save_ckpt/checkpoints/global_step_40000/hf_ckpt \
-  --robo_name xtrainer \
-  --data_path /path/to/lerobot_dataset \
-  --traj_ids 0 1 2 \
-  --use_length 50 \
-  --save_plot_path ./open_loop_test/
-```
-
-参数：
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--model_path` | 必填 | 含 `.safetensors` 的 checkpoint 目录。 |
-| `--robo_name` | 必填 | `configs/robot_configs` 下的机器人配置名。 |
-| `--norm_path` | 无 | 覆盖归一化统计文件路径。 |
-| `--data_path` | 无 | 验证数据路径；不填则用训练配置中的 `train_path`。 |
-| `--traj_ids` | `[0]` | 要评估的 episode 编号，可传多个。 |
-| `--use_length` | `50` | 每次推理取用的动作步数。 |
-| `--chunk_ret` | 自动 | 是否返回完整 action chunk；不填时根据训练配置的 `video_enabled` 自动决定。 |
-| `--max_infer_time` | `10` | 最大前向次数。步进模式下评估 `max_infer_time × use_length` 步。 |
-| `--num_denoising_step` | `10` | 去噪步数。 |
-| `--use_compile` | 关闭 | 启用 `torch.compile`。 |
-| `--use_bf16` | 关闭 | 使用 bfloat16 降低显存。 |
-| `--policy` | `auto` | `auto` / `qwen2` / `qwen3vl`。`auto` 时读取 `lingbotvla_cli.yaml` 判断。 |
-| `--video_debug_dir` | 无 | 保存采样的视频片段用于排查。 |
-| `--save_plot_path` | `./open_loop_test/` | 曲线图输出目录，文件名为 `<traj_id>.png`。 |
-
-X-Trainer 使用 Qwen3-VL 分支，`--policy auto` 会解析出 `qwen3vl`，与策略服务保持一致。
-
-## 13. 启动策略服务
-
-```bash
-python scripts/open_loop_eval.py \
-  --model_path /path/to/checkpoint \
-  --robo_name xtrainer \
-  --norm_path assets/norm_stats/xtrainer.json \
-  --data_path /path/to/lerobot_validation_dataset \
-  --traj_ids 0 1 2 \
-  --use_length 50 \
-  --max_infer_time 10 \
-  --use_bf16 \
-  --save_plot_path ./open_loop_test
-```
-
-离线 MSE/MAE 只能用于排查数据和 checkpoint，不等价于真实任务成功率。
-
----
-
-## 12. Policy Server
+## 12. 启动策略服务
 
 ### 12.1 启动
 
@@ -642,9 +605,9 @@ result = policy.infer(observation)
 - checkpoint 路径向上三级存在训练时生成的 `lingbotvla_cli.yaml`。
 - Qwen3-VL 基础模型路径从训练配置的 `tokenizer_path` 读取，可用 `QWEN3VL_PATH` 环境变量覆盖。
 
-## 14. 启动真机任务
+## 13. 启动真机任务
 
-### 14.1 启动命令
+### 13.1 启动命令
 
 ```bash
 # 终端 1
@@ -664,7 +627,7 @@ python scripts/run_xtrainer_real.py \
 
 **安全提示：客户端没有 `--execute` 之类的二次确认开关。** 参数校验通过后程序会立即连接机械臂、复位并开始下发动作。上机前必须清空工作空间、确认急停可触达，并先用很小的 `--max-steps` 试跑。
 
-### 14.2 参数
+### 13.2 参数
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -696,50 +659,10 @@ python scripts/run_xtrainer_real.py \
 
 服务端的 `--use-length` 必须**不小于**客户端的 `--action-horizon`，并且不要向服务端传 `--step-mode`。
 
-### 14.3 客户端行为
+### 13.3 客户端行为
 
 - `observation.state` 由左臂 7 维（6 关节 + 夹爪）与右臂 7 维拼接而成，与第 2.3 节顺序一致。
 - 三路图像会先 `resize_with_pad` 到 `render_height × render_width`，再转成 uint8。
 - 动作下发前会校验形状必须为 14 维且全部有限；两个夹爪目标会被裁剪到 `[0,1]`。
 - 关节变化超过 `--max-joint-delta` 时不会直接跳变，而是按 `--ramp-step` 插值过去。
 - 客户端只能拒绝格式错误、NaN 或 Inf 动作，**无法判断一个数值合法的动作对当前场景是否安全**。
-
-## 15. 关键文件索引
-
-```text
-tools/create_train_env.sh                       # 训练环境构建
-download_base_models.sh / .ps1                  # 基础模型下载
-train.sh                                        # torchrun 封装
-tasks/vla/train_lingbotvla.py                   # 训练入口
-scripts/compute_norm_stats.py                   # 归一化统计
-scripts/open_loop_eval.py                       # 开环评估
-scripts/serve_policy.py                         # 策略服务
-scripts/run_xtrainer_real.py                    # 真机客户端
-scripts/download_hf_model.py                    # 通用模型下载
-scripts/download_hf_data.py                     # 通用数据集下载
-configs/robot_configs/xtrainer.yaml             # X-Trainer 特征映射
-configs/robot_configs/xtrainer_clothes.yaml     # X-Trainer 变体（独立统计量）
-configs/vla/xtrainer/xtrainer.yaml              # X-Trainer 训练配置
-configs/vla/norm_compute/post_data.yaml         # 专用统计配置
-configs/vla/real_robot/real_robot.yaml          # 官方真实机器人训练示例
-deploy/lingbot_vla_v2_policy.py                 # 策略封装
-deploy/websocket_policy_server.py               # WebSocket 服务端
-deploy/websocket_client_policy.py               # WebSocket 客户端
-deploy/xtrainer_real/README.md                  # 真机客户端说明
-deploy/xtrainer_real/environment.py             # 真机环境
-deploy/xtrainer_real/hardware/                  # Dobot 与 RealSense 封装
-lingbotvla/data/vla_data/README.md              # 数据准备与机器人配置详解
-docs/config/lingbotvla_config_doc.md            # 训练参数说明
-configs/vla/Training_Config.md                  # 训练配置示例与批大小规则
-```
-
-## 16. 已知限制与注意事项
-
-1. **LoRA 暂未提供训练入口。** `lingbotvla/utils/lora_utils.py` 只是一个工具模块，仓库内没有对应的训练脚本或配置。需要 LoRA 微调时应先补齐入口，不要直接套用全参训练命令。
-2. **训练脚本强制离线。** `train.sh` 导出的 `HF_*_OFFLINE=1` 会让所有在线拉取失败，模型与数据必须提前下载。
-3. **`compute_norm_stats.py` 使用 `fork` 启动多进程**，仅适用于 Linux。Windows 上仅能运行部署侧（服务端/客户端）代码。
-4. **真机客户端没有二次确认开关**，启动即连接并运动，务必先小步数试跑。
-5. **`assets/norm_stats/` 中没有 `xtrainer.json`**，训练前必须自己生成。
-6. **不要单独拷贝 `hf_ckpt` 目录**，服务端和评估都依赖向上三级能找到的 `lingbotvla_cli.yaml`。
-7. `configs/vla/xtrainer/xtrainer.yaml` 中的 `model_path`、`tokenizer_path`、`data.train_path`、`train.output_dir` 以及深度/视频教师路径都是占位值，训练前必须逐个确认。
-8. 训练与部署必须使用同一份 `configs/robot_configs/xtrainer.yaml` 和同一份归一化统计，否则动作量纲会不一致。
