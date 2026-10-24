@@ -1,7 +1,7 @@
 # X-Trainer 部署 LingBot-VLA 2.0 手册
 
 版本：V2.0
-更新日期：2026-10-13
+更新日期：2026-10-24
 适用代码：`GC-SHIRO/X-Trainer-LingBot-VLA2.0` `main`
 
 ---
@@ -13,20 +13,22 @@
 主流程：
 
 ```text
-基础模型下载 -> 训练环境部署 -> LeRobot 数据集准备 -> 机器人配置映射
+基础模型下载 -> 训练环境部署 -> raw 示教数据转换为 LeRobot v3.0 -> 机器人配置映射
 -> 计算归一化统计 -> 全参微调 -> 开环评估 -> 策略服务 -> 真机执行
 ```
 
 本文所有命令默认在仓库根目录、Linux/Bash 环境下执行，路径请替换为实际值。
 
-**注意：本仓库不包含数据采集代码。** X-Trainer 的遥操作采集、raw 数据结构和 LeRobot 转换脚本位于另册，采集流程请参考同目录的 `X-Trainer-XVLA` 手册第 5 至第 7 节。本文从"已经拿到 LeRobot 数据集"开始。
+**本仓库不包含数据采集代码。** X-Trainer 的遥操作采集流程请参考同目录的 `X-Trainer-XVLA` 手册第 5 至第 7 节。拿到 raw 原始记录后，使用本仓库的 `tools/convert_raw_to_lerobot_3.py` 转换为 LeRobot v3.0，具体命令见第 6 节。
 
 ## 2. 总体架构
 
 ### 2.1 端到端流程
 
 ```text
-X-Trainer 示教数据（LeRobot v2.1 / v3.0）
+X-Trainer raw 示教数据（collect_data/<episode_id>/）
+    -> tools/convert_raw_to_lerobot_3.py           原始记录转换
+    -> LeRobot v3.0 数据集目录
     -> configs/robot_configs/xtrainer.yaml        特征映射
     -> scripts/compute_norm_stats.py              归一化统计
     -> assets/norm_stats/xtrainer.json
@@ -46,7 +48,8 @@ X-Trainer 示教数据（LeRobot v2.1 / v3.0）
 | 分布式启动 | `train.sh` | `torchrun` 封装，自动探测可见 GPU 数并写 `log.txt`。 |
 | 归一化统计 | `scripts/compute_norm_stats.py` | 统计 state/action 的 mean/std，生成 JSON。 |
 | 开环评估 | `scripts/open_loop_eval.py` | 单轨迹动作对比，输出 MSE/MAE 与曲线图。 |
-| 数据加载 | `lingbotvla/data/vla_data/` | LeRobot v2.1/v3.0 加载、多数据集拼接、特征映射。 |
+| 数据转换 | `tools/convert_raw_to_lerobot_3.py` | raw 原始记录转 LeRobot v3.0，三路相机对齐、坏帧过滤。 |
+| 数据加载 | `lingbotvla/data/vla_data/` | LeRobot v3.0 加载、多数据集拼接、特征映射。 |
 | 机器人配置 | `configs/robot_configs/*.yaml` | raw 特征名到统一特征空间的映射。 |
 | VLA 训练配置 | `configs/vla/<robot>/<robot>.yaml` | 模型、数据、并行、优化器、MoE、对齐参数。 |
 | 策略封装 | `deploy/lingbot_vla_v2_policy.py` | `LingbotVLAv2Server`，加载 checkpoint 与归一化器。 |
@@ -203,7 +206,7 @@ python scripts/download_hf_data.py  --repo_id <owner/dataset> --local_dir <目�
 
 ## 6. 数据准备（LeRobot 数据集）
 
-LingBot-VLA 2.0 通过 LeRobot 的 `LeRobotDataset` 读取数据，**同时支持 LeRobot v2.1 和 v3.0 目录布局**，不需要为了训练做格式转换或数据集合并。
+LingBot-VLA 2.0 通过 LeRobot 的 `LeRobotDataset` 读取数据。本仓库固定使用的 `lerobot==0.4.2` 环境需要 **LeRobot v3.0 数据格式**：raw 原始记录使用下面的新脚本直接转换；已有 v2.1 数据集则按第 6.2 节升级。多个数据集可以在加载时拼接，无需预先合并文件。
 
 每个数据集条目可以是 Hugging Face repo id，也可以是本地 LeRobot 数据集目录。至少需要包含：
 
@@ -216,7 +219,60 @@ LingBot-VLA 2.0 通过 LeRobot 的 `LeRobotDataset` 读取数据，**同时支�
 | `observation.images.right_wrist` | image | 右腕相机 |
 | `task` | text | 自然语言任务描述 |
 
-### 6.1 单个数据集
+### 6.1 从 raw 原始记录生成 LeRobot v3.0
+
+输入目录中，每个 episode（一次完整示教记录）包含三路相机图像和逐帧的机器人状态、动作：
+
+```text
+collect_data/<episode_id>/
+  topImg/<frame_id>.jpg
+  leftImg/<frame_id>.jpg
+  rightImg/<frame_id>.jpg
+  observation/<frame_id>.pkl  # joint_positions：状态；control：动作
+```
+
+在已安装训练依赖的环境中执行：
+
+```bash
+python tools/convert_raw_to_lerobot_3.py \
+  --raw-root /data/collect_data \
+  --output-root /data/xtrainer_lerobot_v3 \
+  --task "Insert the test tube on the desktop into the rack." \
+  --fps 30
+```
+
+`--task` 替换为这批示教的实际任务描述，`--fps` 设置为采集帧率。脚本按帧编号对齐状态与三路相机，默认跳过损坏帧、保留至少 10 个有效帧的记录，并将图像编码为 MP4。可用 `--skip-first-frames N` 跳过每段记录开头的 N 帧，用 `--min-frames N` 调整最少有效帧数；`--no-videos` 可改为将图像直接存入数据文件。
+
+输出直接采用 v3.0 布局，无需再运行 v2.1 转换工具：
+
+```text
+xtrainer_lerobot_v3/
+  data/chunk-000/file-000.parquet
+  videos/observation.images.top/chunk-000/file-000.mp4
+  videos/observation.images.left_wrist/chunk-000/file-000.mp4
+  videos/observation.images.right_wrist/chunk-000/file-000.mp4
+  meta/info.json
+  meta/stats.json
+  meta/tasks.parquet
+  meta/episodes/chunk-000/file-000.parquet
+```
+
+每段示教分别保存数据和视频文件；`meta/episodes` 记录每段示教的文件位置、帧范围、视频时间范围及统计量。输出目录默认必须为空，只有显式传入 `--overwrite-output` 才会删除并重建已有输出；输入、输出目录不能相互包含。转换完成后，将后续的 `data.train_path` 指向 `/data/xtrainer_lerobot_v3`，完成机器人和训练配置后，继续执行第 9 节的训练归一化统计计算。
+
+### 6.2 已有 LeRobot v2.1 数据集
+
+已有 v2.1 数据不需要重新读取 raw，使用仓库内的升级工具：
+
+```bash
+python tools/convert_dataset_v21_to_v30.py \
+  --root /data \
+  --repo-id xtrainer_lerobot \
+  --push-to-hub false
+```
+
+这里输入数据集位于 `/data/xtrainer_lerobot`，`--root` 填其父目录。成功后原路径保存 v3.0 数据，旧数据保留在 `/data/xtrainer_lerobot_old`。更多说明见 [v2.1 → v3.0 转换说明](tools/convert_dataset_v21_to_v30.md)。
+
+### 6.3 单个数据集
 
 把 `data.data_name` 设为机器人配置名（`xtrainer`），`data.train_path` 指向数据集目录：
 
@@ -228,7 +284,7 @@ data:
   robot_config_root: ./configs/robot_configs
 ```
 
-### 6.2 多个数据集
+### 6.4 多个数据集
 
 把 `data.data_name` 设为 `multi`，`data.train_path` 指向一个**文本清单文件**。每个非空行两列，用空格分隔：
 
